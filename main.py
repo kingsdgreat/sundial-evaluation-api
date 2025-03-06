@@ -104,7 +104,7 @@ def get_state_abbreviation(state: str) -> str:
 def format_regrid_path(state: str, county: str) -> str:
     """Format the path parameter for Regrid API"""
     state_abbr = get_state_abbreviation(state)
-    return f"/us/{state_abbr.lower()}/{county.lower().replace(' ', '_')}"
+    return f"/us/{state_abbr.lower()}/{county.lower().split(' ')[0]}"
 
 def get_property_info_from_regrid(apn: str, county: str, state: str) -> Optional[Dict]:
     """Fetch property information from Regrid API"""
@@ -262,7 +262,12 @@ def detect_outliers_iqr(properties: List[Dict], price_key: str = "price_per_acre
     return valid_properties, outlier_properties
 
 def calculate_property_value(target_acreage: float, comparable_properties: List[Dict]) -> Dict:
-    if not comparable_properties:
+    valid_price_per_acre_values = [
+        prop["price_per_acre"] for prop in comparable_properties 
+        if "price_per_acre" in prop and prop["price_per_acre"] is not None
+    ]
+    
+    if not valid_price_per_acre_values:
         return {
             "estimated_value_avg": None,
             "estimated_value_median": None,
@@ -270,13 +275,8 @@ def calculate_property_value(target_acreage: float, comparable_properties: List[
             "comparable_count": 0
         }
     
-    price_per_acre_values = [
-        prop["price_per_acre"] for prop in comparable_properties 
-        if "price_per_acre" in prop and prop["price_per_acre"] is not None
-    ]
-    
-    avg_price_per_acre = statistics.mean(price_per_acre_values)
-    median_price_per_acre = statistics.median(price_per_acre_values)
+    avg_price_per_acre = statistics.mean(valid_price_per_acre_values)
+    median_price_per_acre = statistics.median(valid_price_per_acre_values)
     
     return {
         "estimated_value_avg": avg_price_per_acre * target_acreage,
