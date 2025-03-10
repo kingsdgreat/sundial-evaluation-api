@@ -1,0 +1,14 @@
+2025-03-10 12:39:04,342 - root - INFO - Request 594c5159-25eb-41cc-9d79-9773819f5198 - Browser initialized
+2025-03-10 12:39:04,343 - root - INFO - Request 594c5159-25eb-41cc-9d79-9773819f5198 - Cleaned APN: 194266
+2025-03-10 12:39:04,343 - root - INFO - Request 594c5159-25eb-41cc-9d79-9773819f5198 started - Input: {'apn': '194266', 'county': 'Durham County', 'state': 'North Carolina'}
+2025-03-10 12:39:04,343 - root - INFO - Starting property valuation for APN: 194266
+2025-03-10 12:39:04,344 - root - INFO - Python version: 3.11.4 (main, Aug  3 2024, 09:05:49) [GCC 14.1.1 20240720]
+2025-03-10 12:39:04,344 - root - INFO - Operating system: linux
+2025-03-10 12:39:09,164 - root - INFO - Accessing login page
+2025-03-10 12:39:09,277 - root - INFO - Email entered
+2025-03-10 12:39:09,341 - root - INFO - Password entered
+2025-03-10 12:39:09,642 - root - INFO - Login button clicked
+2025-03-10 12:39:24,652 - root - INFO - No proceed button found - user may already be logged in
+2025-03-10 12:39:24,652 - root - INFO - Login successful
+2025-03-10 12:39:24,652 - root - INFO - State conversion: Input 'North Carolina' -> Converted to 'NC'
+2025-03-10 12:39:24,652 - root - INFO - Searching for address: APN# 194266, Durham County, NC
