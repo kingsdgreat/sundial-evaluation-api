@@ -13,6 +13,8 @@ import requests
 import uuid
 import traceback
 import sys
+from datetime import datetime
+
 
 from bs4 import BeautifulSoup
 from DrissionPage import ChromiumOptions, WebPage
@@ -469,17 +471,32 @@ def clean_apn(apn: str) -> str:
 async def read_root():
     return {"message": "Welcome to the Property Valuation API"}
 
+
 @app.post("/test-endpoint")
 async def test_endpoint():
-    return {
-        "status": "success",
-        "message": "API is working",
-        "environment": {
-            "python_version": sys.version,
-            "platform": sys.platform,
-            "timestamp": str(datetime.now())
-        }
-    }
+    try:
+        return JSONResponse(
+            status_code=200,
+            content={
+                "status": "success",
+                "message": "API is working",
+                "environment": {
+                    "python_version": sys.version,
+                    "platform": sys.platform,
+                    "timestamp": str(datetime.now())
+                }
+            }
+        )
+    except Exception as e:
+        return JSONResponse(
+            status_code=500,
+            content={
+                "status": "error",
+                "error_type": type(e).__name__, 
+                "error_message": str(e),
+                "traceback": traceback.format_exc()
+            }
+        )
 
 @app.post("/valuate-property", response_model=None)  
 async def valuate_property(property_request: PropertyRequest):
