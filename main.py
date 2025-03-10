@@ -469,6 +469,18 @@ def clean_apn(apn: str) -> str:
 async def read_root():
     return {"message": "Welcome to the Property Valuation API"}
 
+@app.post("/test-endpoint")
+async def test_endpoint():
+    return {
+        "status": "success",
+        "message": "API is working",
+        "environment": {
+            "python_version": sys.version,
+            "platform": sys.platform,
+            "timestamp": str(datetime.now())
+        }
+    }
+
 @app.post("/valuate-property", response_model=None)  
 async def valuate_property(property_request: PropertyRequest):
     request_id = str(uuid.uuid4())
