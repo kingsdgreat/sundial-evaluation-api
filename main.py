@@ -19,6 +19,7 @@ from DrissionPage import ChromiumOptions, WebPage
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 from DrissionPage.errors import BrowserConnectError
+from fastapi.responses import JSONResponse
 
 # Configure logging
 # Configure logging for Vercel environment
@@ -85,14 +86,10 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "https://www.sundiallands.com",
-        "https://sundiallands.com",
-        "http://localhost:3000"
-    ],
+    allow_origins=["*"],  # Allows all origins
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["*"],  # Allows all methods
+    allow_headers=["*"],  # Allows all headers
 )
 
 STATE_ABBREVIATIONS = {
@@ -472,7 +469,7 @@ def clean_apn(apn: str) -> str:
 async def read_root():
     return {"message": "Welcome to the Property Valuation API"}
 
-@app.post("/valuate-property", response_model=ValuationResponse)
+@app.post("/valuate-property", response_model=None)  
 async def valuate_property(property_request: PropertyRequest):
     request_id = str(uuid.uuid4())
     cleaned_apn = clean_apn(property_request.apn)
@@ -501,11 +498,15 @@ async def valuate_property(property_request: PropertyRequest):
         
         coordinates = extract_coordinates(page.html)
         if not coordinates:
-            return {
-                "error": "Property coordinates not found",
-                "status": 404,
-                "request_id": request_id
-            }
+            return JSONResponse(
+                status_code=404,
+                content={
+                    "status": "error",
+                    "request_id": request_id,
+                    "error": "Property coordinates not found",
+                    "property": property_request.dict()
+                }
+            )
         
         logging.info(f"Found coordinates: {coordinates}")
         
@@ -517,27 +518,37 @@ async def valuate_property(property_request: PropertyRequest):
         valuation_results = calculate_property_value(target_acreage, valid_properties)
         logging.info(f"Valuation completed successfully: {valuation_results}")
         
-        return ValuationResponse(
-            target_property=f"APN# {cleaned_apn}, {property_request.county}, {property_request.state}",
-            target_acreage=target_acreage,
-            search_radius_miles=final_radius,
-            comparable_count=valuation_results['comparable_count'],
-            estimated_value_avg=valuation_results['estimated_value_avg'],
-            estimated_value_median=valuation_results['estimated_value_median'],
-            price_per_acre_stats=ValuationStats(**valuation_results['price_per_acre_stats']) if valuation_results['price_per_acre_stats'] else None,
-            comparable_properties=[ComparableProperty(**prop) for prop in valid_properties],
-            outlier_properties=[ComparableProperty(**prop) for prop in outlier_properties]
+        return JSONResponse(
+            status_code=200,
+            content={
+                "status": "success",
+                "request_id": request_id,
+                "target_property": f"APN# {cleaned_apn}, {property_request.county}, {property_request.state}",
+                "target_acreage": target_acreage,
+                "search_radius_miles": final_radius,
+                "comparable_count": valuation_results['comparable_count'],
+                "estimated_value_avg": valuation_results['estimated_value_avg'],
+                "estimated_value_median": valuation_results['estimated_value_median'],
+                "price_per_acre_stats": valuation_results['price_per_acre_stats'],
+                "comparable_properties": valid_properties,
+                "outlier_properties": outlier_properties
+            }
         )
         
     except Exception as e:
         error_detail = {
+            "status": "error",
             "request_id": request_id,
             "error_type": type(e).__name__,
             "error_message": str(e),
-            "traceback": traceback.format_exc()
+            "traceback": traceback.format_exc(),
+            "property": property_request.dict()
         }
         logging.error(f"Request {request_id} failed: {error_detail}")
-        return error_detail
+        return JSONResponse(
+            status_code=500,
+            content=error_detail
+        )
 
     finally:
         page.close()
