@@ -132,8 +132,17 @@ def initialize_webpage() -> WebPage:
     co.set_argument('--no-sandbox')
     co.set_argument('--disable-dev-shm-usage')
     co.set_argument('--disable-gpu')
+    co.set_argument('--single-process')
+    co.set_argument('--disable-setuid-sandbox')
+    co.set_argument('--disable-software-rasterizer')
     port = random.randint(9222, 9322)
     co.set_argument(f'--remote-debugging-port={port}')
+    
+    # Add cloud browser configuration if available
+    if os.environ.get('BROWSERLESS_TOKEN'):
+        co.set_argument(f'--remote-debugging-address={os.environ.get("BROWSERLESS_HOST", "chrome.browserless.io")}')
+        co.set_argument(f'--remote-debugging-port={os.environ.get("BROWSERLESS_PORT", "3000")}')
+    
     page = WebPage(chromium_options=co)
     page.set.window.max()
     return page
