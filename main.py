@@ -472,12 +472,12 @@ async def read_root():
 
 @app.post("/valuate-property", response_model=ValuationResponse)
 async def valuate_property(property_request: PropertyRequest):
+    request_id = str(uuid.uuid4())
     cleaned_apn = clean_apn(property_request.apn)
     page = initialize_webpage()
     logging.info(f"Request {request_id} - Browser initialized")
     logging.info(f"Request {request_id} - Cleaned APN: {cleaned_apn}")
         
-    request_id = str(uuid.uuid4())
     logging.info(f"Request {request_id} started - Input: {property_request.dict()}")
     
     try:
@@ -532,7 +532,7 @@ async def valuate_property(property_request: PropertyRequest):
         }
         logging.error(f"Request {request_id} failed: {error_detail}")
         raise HTTPException(status_code=500, detail=error_detail)
-        
+
     finally:
         page.close()
         page.quit()
