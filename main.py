@@ -11,6 +11,7 @@ from pydantic import BaseModel
 import uvicorn
 import requests
 import traceback
+import sys
 
 from bs4 import BeautifulSoup
 from DrissionPage import ChromiumOptions, WebPage
@@ -20,7 +21,12 @@ from DrissionPage.errors import BrowserConnectError
 
 # Configure logging
 logging.basicConfig(
-    level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler(sys.stdout),
+        logging.FileHandler('app.log')
+    ]
 )
 
 # Constants
@@ -468,10 +474,17 @@ async def read_root():
 async def valuate_property(property_request: PropertyRequest):
     cleaned_apn = clean_apn(property_request.apn)
     page = initialize_webpage()
+    logging.info(f"Request {request_id} - Browser initialized")
+    logging.info(f"Request {request_id} - Cleaned APN: {cleaned_apn}")
+        
+    request_id = str(uuid.uuid4())
+    logging.info(f"Request {request_id} started - Input: {property_request.dict()}")
     
     try:
         # Log the start of processing
         logging.info(f"Starting property valuation for APN: {cleaned_apn}")
+        logging.info(f"Python version: {sys.version}")
+        logging.info(f"Operating system: {sys.platform}")
         
         login_to_propstream(page, EMAIL, PASSWORD)
         logging.info("Login successful")
@@ -511,17 +524,15 @@ async def valuate_property(property_request: PropertyRequest):
         )
         
     except Exception as e:
-        error_trace = traceback.format_exc()
-        logging.error(f"Detailed error trace:\n{error_trace}")
-        logging.error(f"Error during property valuation: {str(e)}")
-        raise HTTPException(
-            status_code=500,
-            detail={
-                "error": str(e),
-                "trace": error_trace,
-                "step": "Property valuation process"
-            }
-        )
+        error_detail = {
+            "request_id": request_id,
+            "error_type": type(e).__name__,
+            "error_message": str(e),
+            "traceback": traceback.format_exc()
+        }
+        logging.error(f"Request {request_id} failed: {error_detail}")
+        raise HTTPException(status_code=500, detail=error_detail)
+        
     finally:
         page.close()
         page.quit()
