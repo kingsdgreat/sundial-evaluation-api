@@ -10,6 +10,7 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 import uvicorn
 import requests
+import traceback
 
 from bs4 import BeautifulSoup
 from DrissionPage import ChromiumOptions, WebPage
@@ -465,22 +466,29 @@ async def read_root():
 
 @app.post("/valuate-property", response_model=ValuationResponse)
 async def valuate_property(property_request: PropertyRequest):
-    # Clean the APN by removing non-numeric characters
     cleaned_apn = clean_apn(property_request.apn)
-    
     page = initialize_webpage()
     
     try:
+        # Log the start of processing
+        logging.info(f"Starting property valuation for APN: {cleaned_apn}")
+        
         login_to_propstream(page, EMAIL, PASSWORD)
-        # Use the cleaned APN in the search
+        logging.info("Login successful")
+        
         search_property(page, ADDRESS_FORMAT, cleaned_apn, property_request.county, property_request.state)
+        logging.info("Property search completed")
         
         target_property_info = extract_property_info(page)
+        logging.info(f"Extracted property info: {target_property_info}")
+        
         target_acreage = target_property_info.get("acreage", 1.0) if target_property_info else 1.0
         
         coordinates = extract_coordinates(page.html)
         if not coordinates:
             raise HTTPException(status_code=404, detail="Property coordinates not found")
+        
+        logging.info(f"Found coordinates: {coordinates}")
         
         latitude, longitude = coordinates
         valid_properties, outlier_properties, final_radius = find_comparable_properties(
@@ -488,6 +496,7 @@ async def valuate_property(property_request: PropertyRequest):
         )
         
         valuation_results = calculate_property_value(target_acreage, valid_properties)
+        logging.info(f"Valuation completed successfully: {valuation_results}")
         
         return ValuationResponse(
             target_property=f"APN# {cleaned_apn}, {property_request.county}, {property_request.state}",
@@ -502,8 +511,17 @@ async def valuate_property(property_request: PropertyRequest):
         )
         
     except Exception as e:
-        logging.error(f"An error occurred: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
+        error_trace = traceback.format_exc()
+        logging.error(f"Detailed error trace:\n{error_trace}")
+        logging.error(f"Error during property valuation: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "error": str(e),
+                "trace": error_trace,
+                "step": "Property valuation process"
+            }
+        )
     finally:
         page.close()
         page.quit()
