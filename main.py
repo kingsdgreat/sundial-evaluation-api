@@ -21,12 +21,12 @@ from contextlib import asynccontextmanager
 from DrissionPage.errors import BrowserConnectError
 
 # Configure logging
+# Configure logging for Vercel environment
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.StreamHandler(sys.stdout),
-        logging.FileHandler('app.log')
+        logging.StreamHandler(sys.stdout)
     ]
 )
 
