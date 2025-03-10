@@ -1,6 +1,7 @@
 import re
 import time
 import logging
+import random
 import math
 import statistics
 import numpy as np
@@ -9,12 +10,12 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 import uvicorn
 import requests
-from dotenv import load_dotenv
-import os
+
+from bs4 import BeautifulSoup
+from DrissionPage import ChromiumOptions, WebPage
 from fastapi.middleware.cors import CORSMiddleware
-
-
-load_dotenv()
+from contextlib import asynccontextmanager
+from DrissionPage.errors import BrowserConnectError
 
 # Configure logging
 logging.basicConfig(
@@ -22,9 +23,10 @@ logging.basicConfig(
 )
 
 # Constants
-REGRID_API_URL = "https://app.regrid.com/api/v2/parcels/apn"
-REGRID_API_TOKEN = os.getenv("REGRID_API_TOKEN")
-
+LOGIN_URL = "https://login.propstream.com/"
+ADDRESS_FORMAT = "APN# {0}, {1}, {2}"
+EMAIL = "kingsdgreatest@gmail.com"
+PASSWORD = "Kanayo147*"
 MILES_TO_DEGREES = 1.0 / 69
 INITIAL_SEARCH_RADIUS_MILES = 1.0
 MAX_SEARCH_RADIUS_MILES = 5.0
@@ -33,19 +35,6 @@ MIN_COMPARABLE_PROPERTIES = 2
 MIN_ACREAGE_RATIO = 0.4
 MAX_ACREAGE_RATIO = 3.0
 PRICE_THRESHOLD = 100000
-
-STATE_ABBREVIATIONS = {
-    'Alabama': 'AL', 'Alaska': 'AK', 'Arizona': 'AZ', 'Arkansas': 'AR', 'California': 'CA',
-    'Colorado': 'CO', 'Connecticut': 'CT', 'Delaware': 'DE', 'Florida': 'FL', 'Georgia': 'GA',
-    'Hawaii': 'HI', 'Idaho': 'ID', 'Illinois': 'IL', 'Indiana': 'IN', 'Iowa': 'IA',
-    'Kansas': 'KS', 'Kentucky': 'KY', 'Louisiana': 'LA', 'Maine': 'ME', 'Maryland': 'MD',
-    'Massachusetts': 'MA', 'Michigan': 'MI', 'Minnesota': 'MN', 'Mississippi': 'MS', 'Missouri': 'MO',
-    'Montana': 'MT', 'Nebraska': 'NE', 'Nevada': 'NV', 'New Hampshire': 'NH', 'New Jersey': 'NJ',
-    'New Mexico': 'NM', 'New York': 'NY', 'North Carolina': 'NC', 'North Dakota': 'ND', 'Ohio': 'OH',
-    'Oklahoma': 'OK', 'Oregon': 'OR', 'Pennsylvania': 'PA', 'Rhode Island': 'RI', 'South Carolina': 'SC',
-    'South Dakota': 'SD', 'Tennessee': 'TN', 'Texas': 'TX', 'Utah': 'UT', 'Vermont': 'VT',
-    'Virginia': 'VA', 'Washington': 'WA', 'West Virginia': 'WV', 'Wisconsin': 'WI', 'Wyoming': 'WY'
-}
 
 class PropertyRequest(BaseModel):
     apn: str
@@ -88,71 +77,176 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=["*"],  # Allows all origins
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["*"],  # Allows all methods
+    allow_headers=["*"],  # Allows all headers
 )
+
+STATE_ABBREVIATIONS = {
+    'Alabama': 'AL', 'Alaska': 'AK', 'Arizona': 'AZ', 'Arkansas': 'AR', 'California': 'CA',
+    'Colorado': 'CO', 'Connecticut': 'CT', 'Delaware': 'DE', 'Florida': 'FL', 'Georgia': 'GA',
+    'Hawaii': 'HI', 'Idaho': 'ID', 'Illinois': 'IL', 'Indiana': 'IN', 'Iowa': 'IA',
+    'Kansas': 'KS', 'Kentucky': 'KY', 'Louisiana': 'LA', 'Maine': 'ME', 'Maryland': 'MD',
+    'Massachusetts': 'MA', 'Michigan': 'MI', 'Minnesota': 'MN', 'Mississippi': 'MS', 'Missouri': 'MO',
+    'Montana': 'MT', 'Nebraska': 'NE', 'Nevada': 'NV', 'New Hampshire': 'NH', 'New Jersey': 'NJ',
+    'New Mexico': 'NM', 'New York': 'NY', 'North Carolina': 'NC', 'North Dakota': 'ND', 'Ohio': 'OH',
+    'Oklahoma': 'OK', 'Oregon': 'OR', 'Pennsylvania': 'PA', 'Rhode Island': 'RI', 'South Carolina': 'SC',
+    'South Dakota': 'SD', 'Tennessee': 'TN', 'Texas': 'TX', 'Utah': 'UT', 'Vermont': 'VT',
+    'Virginia': 'VA', 'Washington': 'WA', 'West Virginia': 'WV', 'Wisconsin': 'WI', 'Wyoming': 'WY'
+}
 
 def get_state_abbreviation(state: str) -> str:
     """Convert state name to two-letter abbreviation"""
-    state = state.title()  # Normalize input
-    if len(state) == 2:
+    # First check if it's already a valid 2-letter code
+    if len(state) == 2 and state.upper() in STATE_ABBREVIATIONS.values():
         return state.upper()
-    return STATE_ABBREVIATIONS.get(state, state)
+    
+    # Clean and normalize the state name
+    state_name = state.strip().title()
+    
+    # Get abbreviation from the mapping
+    abbr = STATE_ABBREVIATIONS.get(state_name)
+    
+    if not abbr:
+        logging.info(f"State conversion: Input '{state}' -> Using as-is")
+        return state.upper()
+    
+    logging.info(f"State conversion: Input '{state}' -> Converted to '{abbr}'")
+    return abbr
 
-def format_regrid_path(state: str, county: str) -> str:
-    """Format the path parameter for Regrid API"""
-    state_abbr = get_state_abbreviation(state)
-    return f"/us/{state_abbr.lower()}/{county.lower().split(' ')[0]}"
+def initialize_webpage() -> WebPage:
+    co = ChromiumOptions()
+    co.headless(True)
+    port = random.randint(9222, 9322)  # Random port in a range
+    co.set_argument(f'--remote-debugging-port={port}')
+    page = WebPage(chromium_options=co)
+    page.set.window.max()
+    return page
 
-def get_property_info_from_regrid(apn: str, county: str, state: str) -> Optional[Dict]:
-    """Fetch property information from Regrid API"""
+def login_to_propstream(page: WebPage, email: str, password: str) -> None:
     try:
-        path = format_regrid_path(state, county)
-        params = {
-            "parcelnumb": apn,
-            "path": path,
-            "token": REGRID_API_TOKEN,
-            "return_zoning": "true",
-            "return_matched_buildings": "true",
-            "return_matched_addresses": "true",
-            "return_enhanced_ownership": "true"
-        }
+        page.get(LOGIN_URL)
+        logging.info("Accessing login page")
         
-        headers = {
-            "accept": "application/json"
-        }
-
-        response = requests.get(
-            REGRID_API_URL,
-            params=params,
-            headers=headers
-        )
-        response.raise_for_status()
-        data = response.json()
-
-        if not data.get("parcels", {}).get("features"):
-            return None
-
-        parcel = data["parcels"]["features"][0]
-        coordinates = parcel["geometry"]["coordinates"][0][0]
-        properties = parcel["properties"]["fields"]
-
-        return {
-            "latitude": coordinates[1],
-            "longitude": coordinates[0],
-            "acreage": properties.get("deeded_acres") or properties.get("gisacre"),
-            "estimated_value": properties.get("parval"),
-            "address": properties.get("address"),
-            "owner": properties.get("owner"),
-            "zoning": properties.get("zoning"),
-            "land_value": properties.get("landval"),
-            "improvement_value": properties.get("improvval")
-        }
-
+        page.ele("@name=username").input(email)
+        logging.info("Email entered")
+        
+        page.ele("@name=password").input(password)
+        logging.info("Password entered")
+        
+        login_button = page.ele('xpath://*[@id="form-content"]/form/button')
+        if login_button:
+            login_button.click()
+            logging.info("Login button clicked")
+        else:
+            logging.error("Login button not found")
+            raise Exception("Login button not found")
+            
+        time.sleep(5)
+        
+        proceed_button = page.ele("@text():Proceed")
+        if proceed_button:
+            proceed_button.click()
+            logging.info("Proceed button clicked")
+        else:
+            logging.info("No proceed button found - user may already be logged in")
+            
     except Exception as e:
-        logging.error(f"Error fetching data from Regrid: {str(e)}")
+        logging.error(f"Login failed with error: {str(e)}")
+        raise
+
+def search_property(page: WebPage, address_format: str, apn: str, county: str, state: str) -> None:
+    state_abbr = get_state_abbreviation(state)
+    address = address_format.format(apn, county, state_abbr)  # Use state_abbr here
+    
+    try:
+        logging.info(f"Searching for address: {address}")
+        
+        time.sleep(7)
+        search_input = page.ele("@type=text")
+        if not search_input:
+            raise Exception("Search input field not found")
+            
+        search_input.input(address)
+        logging.info("Address entered in search")
+        
+        time.sleep(3)
+        result = page.ele(f"@text()={address}")
+        if not result:
+            raise Exception("Search result not found")
+        
+        time.sleep(3)
+        result = page.ele(f"@text()={address}")
+        if not result:
+            raise Exception("Search result not found")
+            
+        result.click()
+        logging.info("Search result clicked")
+        
+        time.sleep(5)
+        property_link = page.ele('xpath://*[@id="root"]/div/div[2]/div/div/div[3]/div[1]/div/section/div[2]/div/div/div/div/div[1]/h3/a')
+        if not property_link:
+            raise Exception("Property details link not found")
+            
+        property_link.click()
+        logging.info("Property details opened")
+        
+        time.sleep(5)
+        location_pin = page.ele('xpath://*[@id="propertyDetail"]/div/div/div[2]/div/div/div/div[1]/div[1]/div/div/div/div/div[1]/div[1]/div')
+        if not location_pin:
+            raise Exception("Location pin not found")
+            
+        location_pin.click()
+        logging.info("Location pin clicked")
+        
+    except Exception as e:
+        logging.error(f"Property search failed: {str(e)}")
+        raise
+
+def extract_coordinates(html: str) -> Optional[Tuple[float, float]]:
+    soup = BeautifulSoup(html, "html.parser")
+    for a_tag in soup.find_all("a", href=True):
+        href = a_tag["href"]
+        if "maps.google.com/maps" in href and "ll=" in href:
+            match = re.search(r"ll=([-+]?\d*\.\d+),([-+]?\d*\.\d+)", href)
+            if match:
+                try:
+                    return float(match.group(1)), float(match.group(2))
+                except ValueError:
+                    logging.warning("Failed to convert coordinates to float.")
+    logging.warning("Coordinates not found in HTML.")
+    return None
+
+def extract_property_info(page: WebPage) -> Optional[Dict]:
+    try:
+        html = page.html
+        soup = BeautifulSoup(html, "html.parser")
+        property_info = {}
+        
+        lot_size_elem = soup.find(lambda tag: tag.name == "div" and "Lot Size" in tag.text)
+        if lot_size_elem:
+            lot_size_text = lot_size_elem.find_next("div").text.strip()
+            if "acres" in lot_size_text.lower():
+                acreage_match = re.search(r"([\d.]+)\s*acres", lot_size_text.lower())
+                if acreage_match:
+                    property_info["acreage"] = float(acreage_match.group(1))
+            elif "sqft" in lot_size_text.lower() or "sq ft" in lot_size_text.lower():
+                sqft_match = re.search(r"([\d,]+)\s*sq", lot_size_text.lower())
+                if sqft_match:
+                    sqft = float(sqft_match.group(1).replace(",", ""))
+                    property_info["acreage"] = sqft / 43560
+
+        value_elem = soup.find(lambda tag: tag.name == "div" and "Estimated Value" in tag.text)
+        if value_elem:
+            value_text = value_elem.find_next("div").text.strip()
+            value_match = re.search(r"\$?([\d,]+)", value_text)
+            if value_match:
+                property_info["estimated_value"] = float(value_match.group(1).replace(",", ""))
+        
+        return property_info
+    except Exception as e:
+        logging.error(f"Failed to extract property info: {e}")
         return None
 
 def calculate_bounding_box(latitude: float, longitude: float, miles: float) -> Tuple[float, float, float, float]:
@@ -164,14 +258,14 @@ def calculate_bounding_box(latitude: float, longitude: float, miles: float) -> T
     west = longitude - lng_offset
     return north, south, east, west
 
-def fetch_zillow_data( north: float, south: float, east: float, west: float) -> List[Dict]:
+def fetch_zillow_data(page: WebPage, north: float, south: float, east: float, west: float) -> List[Dict]:
     def get_url_for_page(page_num: int) -> str:
-        return f"https://www.zillow.com/homes/recently_sold/{page_num}_p/?searchQueryState=%7B%22pagination%22%3A%7B%22currentPage%22%3A{page_num}%7D%2C%22isMapVisible%22%3Atrue%2C%22mapBounds%22%3A%7B%22west%22%3A{west}%2C%22east%22%3A{east}%2C%22south%22%3A{south}%2C%22north%22%3A{north}%7D%2C%22mapZoom%22%3A14%2C%22usersSearchTerm%22%3A%22%22%2C%22filterState%22%3A%7B%22sort%22%3A%7B%22value%22%3A%22globalrelevanceex%22%7D%2C%22fsba%22%3A%7B%22value%22%3Afalse%7D%2C%22fsbo%22%3A%7B%22value%22%3Afalse%7D%2C%22nc%22%3A%7B%22value%22%3Afalse%7D%2C%22cmsn%22%3A%7B%22value%22%3Afalse%7D%2C%22auc%22%3A%7B%22value%22%3Afalse%7D%2C%22fore%22%3A%7B%22value%22%3Afalse%7D%2C%22rs%22%3A%7B%22value%22%3Atrue%7D%7D%7D"
+        return f"https://www.zillow.com/homes/recently_sold/{page_num}_p/?searchQueryState=%7B%22pagination%22%3A%7B%22currentPage%22%3A{page_num}%7D%2C%22isMapVisible%22%3Atrue%2C%22mapBounds%22%3A%7B%22west%22%3A{west}%2C%22east%22%3A{east}%2C%22south%22%3A{south}%2C%22north%22%3A{north}%7D%2C%22mapZoom%22%3A14%2C%22usersSearchTerm%22%3A%22%22%2C%22filterState%22%3A%7B%22sort%22%3A%7B%22value%22%3A%22globalrelevanceex%22%7D%2C%22fsba%22%3A%7B%22value%22%3Afalse%7D%2C%22fsbo%22%3A%7B%22value%22%3Afalse%7D%2C%22nc%22%3A%7B%22value%22%3Afalse%7D%2C%22cmsn%22%3A%7B%22value%22%3Afalse%7D%2C%22auc%22%3A%7B%22value%22%3Afalse%7D%2C%22fore%22%3A%7B%22value%22%3Afalse%7D%2C%22rs%22%3A%7B%22value%22%3Atrue%7D%2C%22sf%22%3A%7B%22value%22%3Afalse%7D%2C%22tow%22%3A%7B%22value%22%3Afalse%7D%2C%22mf%22%3A%7B%22value%22%3Afalse%7D%2C%22con%22%3A%7B%22value%22%3Afalse%7D%2C%22apa%22%3A%7B%22value%22%3Afalse%7D%2C%22manu%22%3A%7B%22value%22%3Afalse%7D%2C%22apco%22%3A%7B%22value%22%3Afalse%7D%7D%2C%22isListVisible%22%3Atrue%7D"
 
     url = "https://zillow-com1.p.rapidapi.com/searchByUrl"
     headers = {
         "x-rapidapi-host": "zillow-com1.p.rapidapi.com",
-        "x-rapidapi-key": os.getenv("ZILLOW_RAPID_API_KEY")
+        "x-rapidapi-key": "0175965f55msh818f681aee07526p177aaejsnc9b3caa29390"
     }
 
     all_homes = []
@@ -186,9 +280,9 @@ def fetch_zillow_data( north: float, south: float, east: float, west: float) -> 
             response = requests.get(url, headers=headers, params=querystring)
             response.raise_for_status()
             data = response.json()
-
             if total_pages is None:
                 total_pages = data.get('totalPages', 1)
+                logging.info(f"Total pages to fetch: {total_pages}")
 
             for property_data in data.get('props', []):
                 try:
@@ -203,11 +297,16 @@ def fetch_zillow_data( north: float, south: float, east: float, west: float) -> 
                         "address": f"{property_data.get('streetAddress', '')}, {property_data.get('city', '')}, {property_data.get('state', '')} {property_data.get('zipcode', '')}",
                         "price": float(price),
                         "price_text": f"${price:,.2f}",
-                        "beds": str(property_data.get('bedrooms', 'N/A')),
-                        "baths": str(property_data.get('bathrooms', 'N/A')),
+                        "beds": str(property_data.get('bedrooms', 'N/A')),  
+                        "baths": str(property_data.get('bathrooms', 'N/A')),  
                         "sqft": str(property_data.get('livingArea', 'N/A')),
+                        "lot_size": f"{lot_acres:.2f} acres",
                         "acreage": float(lot_acres),
-                        "price_per_acre": float(price) / float(lot_acres) if lot_acres > 0 else None
+                        "price_per_acre": float(price) / float(lot_acres) if lot_acres > 0 else None,
+                        "date_sold": property_data.get('dateSold'),
+                        "home_type": property_data.get('homeType'),
+                        "latitude": property_data.get('latitude'),
+                        "longitude": property_data.get('longitude')
                     }
                     
                     all_homes.append(property_dict)
@@ -216,22 +315,27 @@ def fetch_zillow_data( north: float, south: float, east: float, west: float) -> 
                     logging.warning(f"Error processing property data: {e}")
                     continue
 
+            logging.info(f"Completed fetching page {current_page} of {total_pages}")
             current_page += 1
             
         except Exception as e:
-            logging.error(f"Error fetching data from Zillow API: {e}")
+            logging.error(f"Error fetching data from Zillow API on page {current_page}: {e}")
             break
 
+    logging.info(f"Successfully processed {len(all_homes)} total properties")
     return all_homes
 
 def filter_properties_by_acreage(properties: List[Dict], target_acreage: float) -> List[Dict]:
     min_acreage = target_acreage * MIN_ACREAGE_RATIO
     max_acreage = target_acreage * MAX_ACREAGE_RATIO
     
-    return [prop for prop in properties 
-            if "acreage" in prop 
-            and prop["acreage"] is not None 
-            and min_acreage <= prop["acreage"] <= max_acreage]
+    filtered_properties = []
+    for prop in properties:
+        if "acreage" in prop and prop["acreage"] is not None:
+            if min_acreage <= prop["acreage"] <= max_acreage:
+                filtered_properties.append(prop)
+    
+    return filtered_properties
 
 def detect_outliers_iqr(properties: List[Dict], price_key: str = "price_per_acre") -> Tuple[List[Dict], List[Dict]]:
     if not properties:
@@ -240,6 +344,7 @@ def detect_outliers_iqr(properties: List[Dict], price_key: str = "price_per_acre
     values = [prop[price_key] for prop in properties if price_key in prop and prop[price_key] is not None]
     
     if len(values) < 4:
+        logging.warning("Not enough values for IQR analysis, skipping outlier detection.")
         return properties, []
     
     q1 = np.percentile(values, 25)
@@ -262,12 +367,7 @@ def detect_outliers_iqr(properties: List[Dict], price_key: str = "price_per_acre
     return valid_properties, outlier_properties
 
 def calculate_property_value(target_acreage: float, comparable_properties: List[Dict]) -> Dict:
-    valid_price_per_acre_values = [
-        prop["price_per_acre"] for prop in comparable_properties 
-        if "price_per_acre" in prop and prop["price_per_acre"] is not None
-    ]
-    
-    if not valid_price_per_acre_values:
+    if not comparable_properties:
         return {
             "estimated_value_avg": None,
             "estimated_value_median": None,
@@ -275,25 +375,36 @@ def calculate_property_value(target_acreage: float, comparable_properties: List[
             "comparable_count": 0
         }
     
-    avg_price_per_acre = statistics.mean(valid_price_per_acre_values)
-    median_price_per_acre = statistics.median(valid_price_per_acre_values)
+    price_per_acre_values = [
+        prop["price_per_acre"] for prop in comparable_properties 
+        if "price_per_acre" in prop and prop["price_per_acre"] is not None
+    ]
+    
+    avg_price_per_acre = statistics.mean(price_per_acre_values)
+    median_price_per_acre = statistics.median(price_per_acre_values)
+    
+    avg_estimated_value = avg_price_per_acre * target_acreage
+    median_estimated_value = median_price_per_acre * target_acreage
+    
+    price_per_acre_stats = {
+        "min": min(price_per_acre_values),
+        "max": max(price_per_acre_values),
+        "avg": avg_price_per_acre,
+        "median": median_price_per_acre,
+        "std_dev": statistics.stdev(price_per_acre_values) if len(price_per_acre_values) > 1 else 0
+    }
     
     return {
-        "estimated_value_avg": avg_price_per_acre * target_acreage,
-        "estimated_value_median": median_price_per_acre * target_acreage,
-        "price_per_acre_stats": {
-            "min": min(price_per_acre_values),
-            "max": max(price_per_acre_values),
-            "avg": avg_price_per_acre,
-            "median": median_price_per_acre,
-            "std_dev": statistics.stdev(price_per_acre_values) if len(price_per_acre_values) > 1 else 0
-        },
+        "estimated_value_avg": avg_estimated_value,
+        "estimated_value_median": median_estimated_value,
+        "price_per_acre_stats": price_per_acre_stats,
         "comparable_count": len(comparable_properties)
     }
 
 def find_comparable_properties(
+    page: WebPage, 
     latitude: float, 
-    longitude:    float, 
+    longitude: float, 
     target_acreage: float
 ) -> Tuple[List[Dict], List[Dict], float]:
     search_radius = INITIAL_SEARCH_RADIUS_MILES
@@ -307,8 +418,11 @@ def find_comparable_properties(
             latitude, longitude, search_radius
         )
         
-        properties = fetch_zillow_data( north, south, east, west)
+        properties = fetch_zillow_data(page, north, south, east, west)
+        logging.info(f"Found {len(properties)} properties within {search_radius} miles.")
+        
         filtered_properties = filter_properties_by_acreage(properties, target_acreage)
+        logging.info(f"Filtered to {len(filtered_properties)} properties with compatible acreage.")
         
         all_properties.extend(filtered_properties)
         
@@ -320,6 +434,7 @@ def find_comparable_properties(
                 addresses.add(prop["address"])
         
         all_properties = unique_properties
+        logging.info(f"Total unique properties found so far: {len(all_properties)}")
         
         if len(all_properties) >= MIN_COMPARABLE_PROPERTIES:
             final_radius = search_radius
@@ -331,34 +446,41 @@ def find_comparable_properties(
     
     return valid_properties, outlier_properties, final_radius
 
+def clean_apn(apn: str) -> str:
+    """
+    Remove all non-numeric characters from the APN.
+    Example: "456-78-901" -> "45678901"
+    """
+    return re.sub(r"[^0-9]", "", apn)
+
 @app.post("/valuate-property", response_model=ValuationResponse)
 async def valuate_property(property_request: PropertyRequest):
+    # Clean the APN by removing non-numeric characters
+    cleaned_apn = clean_apn(property_request.apn)
+    
+    page = initialize_webpage()
     
     try:
-        property_info = get_property_info_from_regrid(
-            property_request.apn, 
-            property_request.county, 
-            property_request.state
-        )
+        login_to_propstream(page, EMAIL, PASSWORD)
+        # Use the cleaned APN in the search
+        search_property(page, ADDRESS_FORMAT, cleaned_apn, property_request.county, property_request.state)
         
-        if not property_info:
-            raise HTTPException(status_code=404, detail="Property information not found")
+        target_property_info = extract_property_info(page)
+        target_acreage = target_property_info.get("acreage", 1.0) if target_property_info else 1.0
         
-        target_acreage = property_info.get("acreage", 1.0)
-        latitude = property_info.get("latitude")
-        longitude = property_info.get("longitude")
-        
-        if not all([latitude, longitude]):
+        coordinates = extract_coordinates(page.html)
+        if not coordinates:
             raise HTTPException(status_code=404, detail="Property coordinates not found")
         
+        latitude, longitude = coordinates
         valid_properties, outlier_properties, final_radius = find_comparable_properties(
-             latitude, longitude, target_acreage
+            page, latitude, longitude, target_acreage
         )
         
         valuation_results = calculate_property_value(target_acreage, valid_properties)
         
         return ValuationResponse(
-            target_property=f"APN# {property_request.apn}, {property_request.county}, {property_request.state}",
+            target_property=f"APN# {cleaned_apn}, {property_request.county}, {property_request.state}",
             target_acreage=target_acreage,
             search_radius_miles=final_radius,
             comparable_count=valuation_results['comparable_count'],
@@ -371,6 +493,9 @@ async def valuate_property(property_request: PropertyRequest):
         
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        page.close()
+        page.quit()
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8000)
