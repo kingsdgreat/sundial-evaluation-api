@@ -87,6 +87,7 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=[
         "https://www.sundiallands.com",
+        "https://sundiallands.com",
         "http://localhost:3000"
     ],
     allow_credentials=True,
