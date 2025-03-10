@@ -77,10 +77,13 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Allows all origins
+    allow_origins=[
+        "https://www.sundiallands.com",
+        "http://localhost:3000"
+    ],
     allow_credentials=True,
-    allow_methods=["*"],  # Allows all methods
-    allow_headers=["*"],  # Allows all headers
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 STATE_ABBREVIATIONS = {
@@ -118,7 +121,10 @@ def get_state_abbreviation(state: str) -> str:
 def initialize_webpage() -> WebPage:
     co = ChromiumOptions()
     co.headless(True)
-    port = random.randint(9222, 9322)  # Random port in a range
+    co.set_argument('--no-sandbox')
+    co.set_argument('--disable-dev-shm-usage')
+    co.set_argument('--disable-gpu')
+    port = random.randint(9222, 9322)
     co.set_argument(f'--remote-debugging-port={port}')
     page = WebPage(chromium_options=co)
     page.set.window.max()
@@ -453,6 +459,10 @@ def clean_apn(apn: str) -> str:
     """
     return re.sub(r"[^0-9]", "", apn)
 
+@app.get("/")
+async def read_root():
+    return {"message": "Welcome to the Property Valuation API"}
+
 @app.post("/valuate-property", response_model=ValuationResponse)
 async def valuate_property(property_request: PropertyRequest):
     # Clean the APN by removing non-numeric characters
@@ -492,6 +502,7 @@ async def valuate_property(property_request: PropertyRequest):
         )
         
     except Exception as e:
+        logging.error(f"An error occurred: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
     finally:
         page.close()
