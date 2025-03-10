@@ -500,7 +500,11 @@ async def valuate_property(property_request: PropertyRequest):
         
         coordinates = extract_coordinates(page.html)
         if not coordinates:
-            raise HTTPException(status_code=404, detail="Property coordinates not found")
+            return {
+                "error": "Property coordinates not found",
+                "status": 404,
+                "request_id": request_id
+            }
         
         logging.info(f"Found coordinates: {coordinates}")
         
@@ -532,7 +536,7 @@ async def valuate_property(property_request: PropertyRequest):
             "traceback": traceback.format_exc()
         }
         logging.error(f"Request {request_id} failed: {error_detail}")
-        raise HTTPException(status_code=500, detail=error_detail)
+        return error_detail
 
     finally:
         page.close()
