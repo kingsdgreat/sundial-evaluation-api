@@ -3,6 +3,6 @@ uvicorn==0.34.0
 pydantic==2.10.6
 requests==2.32.3
 beautifulsoup4==4.13.3
-numpy==2.2.3
+numpy==1.23.5        # for Python 3.9
 DrissionPage==4.1.0.17
 python-dotenv==1.0.1

@@ -10,27 +10,17 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 import uvicorn
 import requests
-import uuid
 import traceback
-import sys
-from datetime import datetime
-
 
 from bs4 import BeautifulSoup
 from DrissionPage import ChromiumOptions, WebPage
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 from DrissionPage.errors import BrowserConnectError
-from fastapi.responses import JSONResponse
 
 # Configure logging
-# Configure logging for Vercel environment
 logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.StreamHandler(sys.stdout)
-    ]
+    level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
 )
 
 # Constants
@@ -88,10 +78,13 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Allows all origins
+    allow_origins=[
+        "https://www.sundiallands.com",
+        "http://localhost:3000"
+    ],
     allow_credentials=True,
-    allow_methods=["*"],  # Allows all methods
-    allow_headers=["*"],  # Allows all headers
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 STATE_ABBREVIATIONS = {
@@ -132,17 +125,8 @@ def initialize_webpage() -> WebPage:
     co.set_argument('--no-sandbox')
     co.set_argument('--disable-dev-shm-usage')
     co.set_argument('--disable-gpu')
-    co.set_argument('--single-process')
-    co.set_argument('--disable-setuid-sandbox')
-    co.set_argument('--disable-software-rasterizer')
     port = random.randint(9222, 9322)
     co.set_argument(f'--remote-debugging-port={port}')
-    
-    # Add cloud browser configuration if available
-    if os.environ.get('BROWSERLESS_TOKEN'):
-        co.set_argument(f'--remote-debugging-address={os.environ.get("BROWSERLESS_HOST", "chrome.browserless.io")}')
-        co.set_argument(f'--remote-debugging-port={os.environ.get("BROWSERLESS_PORT", "3000")}')
-    
     page = WebPage(chromium_options=co)
     page.set.window.max()
     return page
@@ -480,48 +464,14 @@ def clean_apn(apn: str) -> str:
 async def read_root():
     return {"message": "Welcome to the Property Valuation API"}
 
-
-@app.post("/test-endpoint")
-async def test_endpoint():
-    try:
-        return JSONResponse(
-            status_code=200,
-            content={
-                "status": "success",
-                "message": "API is working",
-                "environment": {
-                    "python_version": sys.version,
-                    "platform": sys.platform,
-                    "timestamp": str(datetime.now())
-                }
-            }
-        )
-    except Exception as e:
-        return JSONResponse(
-            status_code=500,
-            content={
-                "status": "error",
-                "error_type": type(e).__name__, 
-                "error_message": str(e),
-                "traceback": traceback.format_exc()
-            }
-        )
-
-@app.post("/valuate-property", response_model=None)  
+@app.post("/valuate-property", response_model=ValuationResponse)
 async def valuate_property(property_request: PropertyRequest):
-    request_id = str(uuid.uuid4())
     cleaned_apn = clean_apn(property_request.apn)
     page = initialize_webpage()
-    logging.info(f"Request {request_id} - Browser initialized")
-    logging.info(f"Request {request_id} - Cleaned APN: {cleaned_apn}")
-        
-    logging.info(f"Request {request_id} started - Input: {property_request.dict()}")
     
     try:
         # Log the start of processing
         logging.info(f"Starting property valuation for APN: {cleaned_apn}")
-        logging.info(f"Python version: {sys.version}")
-        logging.info(f"Operating system: {sys.platform}")
         
         login_to_propstream(page, EMAIL, PASSWORD)
         logging.info("Login successful")
@@ -536,15 +486,7 @@ async def valuate_property(property_request: PropertyRequest):
         
         coordinates = extract_coordinates(page.html)
         if not coordinates:
-            return JSONResponse(
-                status_code=404,
-                content={
-                    "status": "error",
-                    "request_id": request_id,
-                    "error": "Property coordinates not found",
-                    "property": property_request.dict()
-                }
-            )
+            raise HTTPException(status_code=404, detail="Property coordinates not found")
         
         logging.info(f"Found coordinates: {coordinates}")
         
@@ -556,38 +498,30 @@ async def valuate_property(property_request: PropertyRequest):
         valuation_results = calculate_property_value(target_acreage, valid_properties)
         logging.info(f"Valuation completed successfully: {valuation_results}")
         
-        return JSONResponse(
-            status_code=200,
-            content={
-                "status": "success",
-                "request_id": request_id,
-                "target_property": f"APN# {cleaned_apn}, {property_request.county}, {property_request.state}",
-                "target_acreage": target_acreage,
-                "search_radius_miles": final_radius,
-                "comparable_count": valuation_results['comparable_count'],
-                "estimated_value_avg": valuation_results['estimated_value_avg'],
-                "estimated_value_median": valuation_results['estimated_value_median'],
-                "price_per_acre_stats": valuation_results['price_per_acre_stats'],
-                "comparable_properties": valid_properties,
-                "outlier_properties": outlier_properties
-            }
+        return ValuationResponse(
+            target_property=f"APN# {cleaned_apn}, {property_request.county}, {property_request.state}",
+            target_acreage=target_acreage,
+            search_radius_miles=final_radius,
+            comparable_count=valuation_results['comparable_count'],
+            estimated_value_avg=valuation_results['estimated_value_avg'],
+            estimated_value_median=valuation_results['estimated_value_median'],
+            price_per_acre_stats=ValuationStats(**valuation_results['price_per_acre_stats']) if valuation_results['price_per_acre_stats'] else None,
+            comparable_properties=[ComparableProperty(**prop) for prop in valid_properties],
+            outlier_properties=[ComparableProperty(**prop) for prop in outlier_properties]
         )
         
     except Exception as e:
-        error_detail = {
-            "status": "error",
-            "request_id": request_id,
-            "error_type": type(e).__name__,
-            "error_message": str(e),
-            "traceback": traceback.format_exc(),
-            "property": property_request.dict()
-        }
-        logging.error(f"Request {request_id} failed: {error_detail}")
-        return JSONResponse(
+        error_trace = traceback.format_exc()
+        logging.error(f"Detailed error trace:\n{error_trace}")
+        logging.error(f"Error during property valuation: {str(e)}")
+        raise HTTPException(
             status_code=500,
-            content=error_detail
+            detail={
+                "error": str(e),
+                "trace": error_trace,
+                "step": "Property valuation process"
+            }
         )
-
     finally:
         page.close()
         page.quit()
