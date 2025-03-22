@@ -31,10 +31,10 @@ PASSWORD = "Kanayo147*"
 MILES_TO_DEGREES = 1.0 / 69
 INITIAL_SEARCH_RADIUS_MILES = 1.0
 MAX_SEARCH_RADIUS_MILES = 5.0
-SEARCH_RADIUS_INCREMENT = 1.0
-MIN_COMPARABLE_PROPERTIES = 2
-MIN_ACREAGE_RATIO = 0.4
-MAX_ACREAGE_RATIO = 3.0
+SEARCH_RADIUS_INCREMENT = 0.5
+MIN_COMPARABLE_PROPERTIES = 5
+MIN_ACREAGE_RATIO = 0.2
+MAX_ACREAGE_RATIO = 5.0
 PRICE_THRESHOLD = 100000
 
 class PropertyRequest(BaseModel):
@@ -125,11 +125,22 @@ def initialize_webpage() -> WebPage:
     co.set_argument('--no-sandbox')
     co.set_argument('--disable-dev-shm-usage')
     co.set_argument('--disable-gpu')
-    port = random.randint(9222, 9322)
-    co.set_argument(f'--remote-debugging-port={port}')
-    page = WebPage(chromium_options=co)
-    page.set.window.max()
-    return page
+    co.set_argument('--disable-extensions')
+    co.set_argument('--disable-setuid-sandbox')
+    co.set_argument('--single-process')
+    co.set_argument('--ignore-certificate-errors')
+    
+    # Add memory optimization
+    co.set_argument('--js-flags=--max-old-space-size=512')
+    co.set_argument('--memory-pressure-off')
+    
+    try:
+        page = WebPage(chromium_options=co)
+        page.set.window.max()
+        return page
+    except Exception as e:
+        logging.error(f"Browser initialization failed: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Browser initialization error: {str(e)}")
 
 def login_to_propstream(page: WebPage, email: str, password: str) -> None:
     try:
@@ -231,29 +242,43 @@ def extract_property_info(page: WebPage) -> Optional[Dict]:
         soup = BeautifulSoup(html, "html.parser")
         property_info = {}
         
+        # Extract lot size
         lot_size_elem = soup.find(lambda tag: tag.name == "div" and "Lot Size" in tag.text)
         if lot_size_elem:
             lot_size_text = lot_size_elem.find_next("div").text.strip()
+            
             if "acres" in lot_size_text.lower():
+                logging.info("Lot size is in acres format")
                 acreage_match = re.search(r"([\d.]+)\s*acres", lot_size_text.lower())
                 if acreage_match:
                     property_info["acreage"] = float(acreage_match.group(1))
             elif "sqft" in lot_size_text.lower() or "sq ft" in lot_size_text.lower():
+                logging.info("Lot size is in square feet format")
                 sqft_match = re.search(r"([\d,]+)\s*sq", lot_size_text.lower())
                 if sqft_match:
                     sqft = float(sqft_match.group(1).replace(",", ""))
                     property_info["acreage"] = sqft / 43560
 
+        # Extract estimated value - FIXED to handle N/A values
         value_elem = soup.find(lambda tag: tag.name == "div" and "Estimated Value" in tag.text)
         if value_elem:
             value_text = value_elem.find_next("div").text.strip()
-            value_match = re.search(r"\$?([\d,]+)", value_text)
-            if value_match:
-                property_info["estimated_value"] = float(value_match.group(1).replace(",", ""))
+            
+            # Check if the value is N/A
+            if "N/A" in value_text:
+                logging.info("Estimated value is N/A")
+                # Don't set estimated_value in this case
+            else:
+                value_match = re.search(r"\$?([\d,]+)", value_text)
+                if value_match and value_match.group(1):
+                    property_info["estimated_value"] = float(value_match.group(1).replace(",", ""))
+                else:
+                    logging.warning(f"Could not extract numeric value from: '{value_text}'")
         
         return property_info
     except Exception as e:
         logging.error(f"Failed to extract property info: {e}")
+        logging.error(traceback.format_exc())
         return None
 
 def calculate_bounding_box(latitude: float, longitude: float, miles: float) -> Tuple[float, float, float, float]:
@@ -267,7 +292,7 @@ def calculate_bounding_box(latitude: float, longitude: float, miles: float) -> T
 
 def fetch_zillow_data(page: WebPage, north: float, south: float, east: float, west: float) -> List[Dict]:
     def get_url_for_page(page_num: int) -> str:
-        return f"https://www.zillow.com/homes/recently_sold/{page_num}_p/?searchQueryState=%7B%22pagination%22%3A%7B%22currentPage%22%3A{page_num}%7D%2C%22isMapVisible%22%3Atrue%2C%22mapBounds%22%3A%7B%22west%22%3A{west}%2C%22east%22%3A{east}%2C%22south%22%3A{south}%2C%22north%22%3A{north}%7D%2C%22mapZoom%22%3A14%2C%22usersSearchTerm%22%3A%22%22%2C%22filterState%22%3A%7B%22sort%22%3A%7B%22value%22%3A%22globalrelevanceex%22%7D%2C%22fsba%22%3A%7B%22value%22%3Afalse%7D%2C%22fsbo%22%3A%7B%22value%22%3Afalse%7D%2C%22nc%22%3A%7B%22value%22%3Afalse%7D%2C%22cmsn%22%3A%7B%22value%22%3Afalse%7D%2C%22auc%22%3A%7B%22value%22%3Afalse%7D%2C%22fore%22%3A%7B%22value%22%3Afalse%7D%2C%22rs%22%3A%7B%22value%22%3Atrue%7D%2C%22sf%22%3A%7B%22value%22%3Afalse%7D%2C%22tow%22%3A%7B%22value%22%3Afalse%7D%2C%22mf%22%3A%7B%22value%22%3Afalse%7D%2C%22con%22%3A%7B%22value%22%3Afalse%7D%2C%22apa%22%3A%7B%22value%22%3Afalse%7D%2C%22manu%22%3A%7B%22value%22%3Afalse%7D%2C%22apco%22%3A%7B%22value%22%3Afalse%7D%7D%2C%22isListVisible%22%3Atrue%7D"
+        return f"https://www.zillow.com/homes/recently_sold/?searchQueryState=%7B%22pagination%22%3A%7B%22currentPage%22%3A{page_num}%7D%2C%22isMapVisible%22%3Atrue%2C%22mapBounds%22%3A%7B%22west%22%3A{west}%2C%22east%22%3A{east}%2C%22south%22%3A{south}%2C%22north%22%3A{north}%7D%2C%22mapZoom%22%3A14%2C%22filterState%22%3A%7B%22sort%22%3A%7B%22value%22%3A%22globalrelevanceex%22%7D%2C%22sf%22%3A%7B%22value%22%3Afalse%7D%2C%22tow%22%3A%7B%22value%22%3Afalse%7D%2C%22mf%22%3A%7B%22value%22%3Afalse%7D%2C%22con%22%3A%7B%22value%22%3Afalse%7D%2C%22apa%22%3A%7B%22value%22%3Afalse%7D%2C%22manu%22%3A%7B%22value%22%3Afalse%7D%2C%22apco%22%3A%7B%22value%22%3Afalse%7D%2C%22rs%22%3A%7B%22value%22%3Atrue%7D%2C%22fsba%22%3A%7B%22value%22%3Afalse%7D%2C%22fsbo%22%3A%7B%22value%22%3Afalse%7D%2C%22nc%22%3A%7B%22value%22%3Afalse%7D%2C%22cmsn%22%3A%7B%22value%22%3Afalse%7D%2C%22auc%22%3A%7B%22value%22%3Afalse%7D%2C%22fore%22%3A%7B%22value%22%3Afalse%7D%7D%2C%22isListVisible%22%3Atrue%7D&category=SEMANTIC"
 
     url = "https://zillow-com1.p.rapidapi.com/searchByUrl"
     headers = {
@@ -285,11 +310,23 @@ def fetch_zillow_data(page: WebPage, north: float, south: float, east: float, we
 
         try:
             response = requests.get(url, headers=headers, params=querystring)
+            
+            # Save the response to a file for inspection
+            with open(f"zillow_response_page_{current_page}.json", "w") as f:
+                f.write(response.text)
+            
             response.raise_for_status()
             data = response.json()
+            
+            if 'props' in data:
+                if len(data['props']) > 0:
+                    # Log the first property to see its structure
+                    first_prop = data['props'][0]
+            else:
+                logging.warning("No 'props' key found in response")
+                
             if total_pages is None:
                 total_pages = data.get('totalPages', 1)
-                logging.info(f"Total pages to fetch: {total_pages}")
 
             for property_data in data.get('props', []):
                 try:
@@ -297,8 +334,22 @@ def fetch_zillow_data(page: WebPage, north: float, south: float, east: float, we
                     lot_acres = property_data.get('lotAreaValue')
                     lot_area_unit = property_data.get('lotAreaUnit', '').lower()
 
-                    if not price or not lot_acres or lot_area_unit != 'acres':
+                    # Log the key property data
+
+                    if not price:
+                        logging.info("Skipping property: No price")
                         continue
+                    if not lot_acres:
+                        logging.info("Skipping property: No lot area value")
+                        continue
+                    if lot_area_unit != 'acres':
+                        # Try to handle square feet
+                        if lot_area_unit == 'sqft':
+                            lot_acres = float(lot_acres) / 43560
+                            logging.info(f"Converted {lot_acres * 43560} sqft to {lot_acres} acres")
+                        else:
+                            logging.info(f"Skipping property: Unsupported lot area unit: {lot_area_unit}")
+                            continue
 
                     property_dict = {
                         "address": f"{property_data.get('streetAddress', '')}, {property_data.get('city', '')}, {property_data.get('state', '')} {property_data.get('zipcode', '')}",
@@ -316,20 +367,20 @@ def fetch_zillow_data(page: WebPage, north: float, south: float, east: float, we
                         "longitude": property_data.get('longitude')
                     }
                     
+                    logging.info(f"Added property: {property_dict['address']}")
                     all_homes.append(property_dict)
                 
                 except Exception as e:
                     logging.warning(f"Error processing property data: {e}")
                     continue
 
-            logging.info(f"Completed fetching page {current_page} of {total_pages}")
             current_page += 1
             
         except Exception as e:
             logging.error(f"Error fetching data from Zillow API on page {current_page}: {e}")
+            logging.error(traceback.format_exc())
             break
 
-    logging.info(f"Successfully processed {len(all_homes)} total properties")
     return all_homes
 
 def filter_properties_by_acreage(properties: List[Dict], target_acreage: float) -> List[Dict]:
@@ -375,6 +426,7 @@ def detect_outliers_iqr(properties: List[Dict], price_key: str = "price_per_acre
 
 def calculate_property_value(target_acreage: float, comparable_properties: List[Dict]) -> Dict:
     if not comparable_properties:
+        logging.warning("No comparable properties found for valuation.")
         return {
             "estimated_value_avg": None,
             "estimated_value_median": None,
@@ -387,8 +439,22 @@ def calculate_property_value(target_acreage: float, comparable_properties: List[
         if "price_per_acre" in prop and prop["price_per_acre"] is not None
     ]
     
+    if not price_per_acre_values:
+        logging.warning("No valid price per acre values found.")
+        return {
+            "estimated_value_avg": None,
+            "estimated_value_median": None,
+            "price_per_acre_stats": None,
+            "comparable_count": len(comparable_properties)
+        }
+    
     avg_price_per_acre = statistics.mean(price_per_acre_values)
-    median_price_per_acre = statistics.median(price_per_acre_values)
+    
+    # Use mean for median if only one value is available
+    if len(price_per_acre_values) == 1:
+        median_price_per_acre = price_per_acre_values[0]
+    else:
+        median_price_per_acre = statistics.median(price_per_acre_values)
     
     avg_estimated_value = avg_price_per_acre * target_acreage
     median_estimated_value = median_price_per_acre * target_acreage
@@ -419,17 +485,14 @@ def find_comparable_properties(
     final_radius = search_radius
     
     while search_radius <= MAX_SEARCH_RADIUS_MILES:
-        logging.info(f"Searching for properties within {search_radius} miles...")
         
         north, south, east, west = calculate_bounding_box(
             latitude, longitude, search_radius
         )
         
         properties = fetch_zillow_data(page, north, south, east, west)
-        logging.info(f"Found {len(properties)} properties within {search_radius} miles.")
         
         filtered_properties = filter_properties_by_acreage(properties, target_acreage)
-        logging.info(f"Filtered to {len(filtered_properties)} properties with compatible acreage.")
         
         all_properties.extend(filtered_properties)
         
@@ -441,7 +504,6 @@ def find_comparable_properties(
                 addresses.add(prop["address"])
         
         all_properties = unique_properties
-        logging.info(f"Total unique properties found so far: {len(all_properties)}")
         
         if len(all_properties) >= MIN_COMPARABLE_PROPERTIES:
             final_radius = search_radius
@@ -449,7 +511,17 @@ def find_comparable_properties(
         
         search_radius += SEARCH_RADIUS_INCREMENT
     
+    # Even if we didn't reach MIN_COMPARABLE_PROPERTIES, use whatever we found
+    final_radius = search_radius if search_radius <= MAX_SEARCH_RADIUS_MILES else MAX_SEARCH_RADIUS_MILES
+    
     valid_properties, outlier_properties = detect_outliers_iqr(all_properties)
+    
+    # If we have very few properties, don't try to detect outliers
+    if len(all_properties) < 4:
+        valid_properties = all_properties
+        outlier_properties = []
+    
+    logging.info(f"Final result: {len(valid_properties)} valid properties and {len(outlier_properties)} outliers")
     
     return valid_properties, outlier_properties, final_radius
 
@@ -458,11 +530,16 @@ def clean_apn(apn: str) -> str:
     Remove all non-numeric characters from the APN.
     Example: "456-78-901" -> "45678901"
     """
-    return re.sub(r"[^0-9]", "", apn)
+    return re.sub(r"[^a-zA-Z0-9]", "", apn)
 
 @app.get("/")
 async def read_root():
     return {"message": "Welcome to the Property Valuation API"}
+
+@app.get("/health")
+async def health_check():
+    return {"status": "healthy", "timestamp": time.time()}
+
 
 @app.post("/valuate-property", response_model=ValuationResponse)
 async def valuate_property(property_request: PropertyRequest):
@@ -471,7 +548,6 @@ async def valuate_property(property_request: PropertyRequest):
     
     try:
         # Log the start of processing
-        logging.info(f"Starting property valuation for APN: {cleaned_apn}")
         
         login_to_propstream(page, EMAIL, PASSWORD)
         logging.info("Login successful")
@@ -480,23 +556,19 @@ async def valuate_property(property_request: PropertyRequest):
         logging.info("Property search completed")
         
         target_property_info = extract_property_info(page)
-        logging.info(f"Extracted property info: {target_property_info}")
         
         target_acreage = target_property_info.get("acreage", 1.0) if target_property_info else 1.0
         
         coordinates = extract_coordinates(page.html)
         if not coordinates:
             raise HTTPException(status_code=404, detail="Property coordinates not found")
-        
-        logging.info(f"Found coordinates: {coordinates}")
-        
+                
         latitude, longitude = coordinates
         valid_properties, outlier_properties, final_radius = find_comparable_properties(
             page, latitude, longitude, target_acreage
         )
         
         valuation_results = calculate_property_value(target_acreage, valid_properties)
-        logging.info(f"Valuation completed successfully: {valuation_results}")
         
         return ValuationResponse(
             target_property=f"APN# {cleaned_apn}, {property_request.county}, {property_request.state}",
