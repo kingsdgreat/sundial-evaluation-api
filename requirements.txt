@@ -1,8 +1,11 @@
 fastapi==0.115.8
 uvicorn==0.34.0
 pydantic==2.10.6
+pydantic-settings==2.8.1
+pydantic_core==2.27.2
 requests==2.32.3
 beautifulsoup4==4.13.3
-numpy==1.23.5        # for Python 3.9
+numpy==1.26.4  # Updated for Python 3.12 compatibility
 DrissionPage==4.1.0.17
 python-dotenv==1.0.1
+redis==5.2.1

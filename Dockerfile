@@ -18,6 +18,7 @@ RUN apt-get update && apt-get install -y \
     libxrandr2 \
     libgbm-dev \
     libasound2 \
+    redis-server \
     && rm -rf /var/lib/apt/lists/*
 
 # Set up virtual display
@@ -33,7 +34,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY . .
 
 # Expose port for Elastic Beanstalk
-EXPOSE 8080
+EXPOSE 8000
 
-# Start Xvfb and run the application with increased timeout
-CMD ["sh", "-c", "Xvfb :99 -screen 0 1024x768x16 & uvicorn main:app --host 0.0.0.0 --port 8080 --timeout-keep-alive 300"]
+# Start Redis server and Xvfb with the FastAPI app
+CMD ["sh", "-c", "redis-server & Xvfb :99 -screen 0 1024x768x16 & uvicorn main:app --host 0.0.0.0 --port 8000 --timeout-keep-alive 300"]

@@ -11,12 +11,19 @@ from pydantic import BaseModel
 import uvicorn
 import requests
 import traceback
+import redis
+import json
+import hashlib
 
 from bs4 import BeautifulSoup
 from DrissionPage import ChromiumOptions, WebPage
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 from DrissionPage.errors import BrowserConnectError
+from functools import lru_cache
+from typing import Optional
+from pydantic_settings import BaseSettings
+from pydantic import Field
 
 # Configure logging
 logging.basicConfig(
@@ -63,12 +70,33 @@ class ValuationResponse(BaseModel):
     target_property: str
     target_acreage: float
     search_radius_miles: float
+    total_comparables_found: int 
     comparable_count: int
     estimated_value_avg: Optional[float]
     estimated_value_median: Optional[float]
     price_per_acre_stats: Optional[ValuationStats]
     comparable_properties: List[ComparableProperty]
     outlier_properties: List[ComparableProperty]
+    search_url: Optional[str] = None  # Make this field optional with a default value
+
+
+class Settings(BaseSettings):
+    CACHE_EXPIRATION: int = 24 * 60 * 60  # 24 hours
+    MAX_CACHE_SIZE: int = 1000
+    API_RETRY_ATTEMPTS: int = 3
+    
+    # Add these fields that were causing the error
+    regrid_api_token: str = Field(default="")
+    zillow_rapid_api_key: str = Field(default="")
+    
+    # Or, to allow any extra fields:
+    model_config = {
+        "extra": "allow",
+        "env_file": ".env"
+    }
+
+settings = Settings()
+
 
 app = FastAPI(
     title="Property Valuation API",
@@ -78,14 +106,30 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "https://www.sundiallands.com",
-        "http://localhost:3000"
-    ],
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Redis connection
+redis_client = redis.Redis(host='localhost', port=6379, db=0)
+
+def generate_cache_key(property_request: PropertyRequest) -> str:
+    """
+    Generate a unique cache key based on property details
+    
+    Args:
+        property_request (PropertyRequest): Property request object
+    
+    Returns:
+        str: Unique MD5 hash cache key
+    """
+    # Create a unique string representation of the request
+    cache_key_str = f"{property_request.apn}_{property_request.county}_{property_request.state}"
+    
+    # Generate MD5 hash to create a consistent, fixed-length key
+    return hashlib.md5(cache_key_str.encode()).hexdigest()
 
 STATE_ABBREVIATIONS = {
     'Alabama': 'AL', 'Alaska': 'AK', 'Arizona': 'AZ', 'Arkansas': 'AR', 'California': 'CA',
@@ -174,8 +218,26 @@ def login_to_propstream(page: WebPage, email: str, password: str) -> None:
         logging.error(f"Login failed with error: {str(e)}")
         raise
 
+@lru_cache(maxsize=1000)
+def get_cached_state_abbreviation(state: str) -> str:
+    """Cached version of state abbreviation conversion"""
+    return get_state_abbreviation(state)
+
+# Modify existing methods to use caching
 def search_property(page: WebPage, address_format: str, apn: str, county: str, state: str) -> None:
-    state_abbr = get_state_abbreviation(state)
+    # Use cached state abbreviation
+    state_abbr = get_cached_state_abbreviation(state)
+    county = county.strip()
+    # Check case-insensitively if it ends with 'county'
+    if county.lower().endswith('county'):
+        # Split the county name to remove 'county' and add it back with proper capitalization
+        base_name = county[:-(len('county'))].strip()
+        county = f"{base_name.title()} County"
+        logging.info(f"County name modified to: {county}")
+    else:
+        # Add 'County' with proper capitalization
+        county = f"{county.title()} County"
+
     address = address_format.format(apn, county, state_abbr)  # Use state_abbr here
     
     try:
@@ -290,9 +352,56 @@ def calculate_bounding_box(latitude: float, longitude: float, miles: float) -> T
     west = longitude - lng_offset
     return north, south, east, west
 
-def fetch_zillow_data(page: WebPage, north: float, south: float, east: float, west: float) -> List[Dict]:
-    def get_url_for_page(page_num: int) -> str:
-        return f"https://www.zillow.com/homes/recently_sold/?searchQueryState=%7B%22pagination%22%3A%7B%22currentPage%22%3A{page_num}%7D%2C%22isMapVisible%22%3Atrue%2C%22mapBounds%22%3A%7B%22west%22%3A{west}%2C%22east%22%3A{east}%2C%22south%22%3A{south}%2C%22north%22%3A{north}%7D%2C%22mapZoom%22%3A14%2C%22filterState%22%3A%7B%22sort%22%3A%7B%22value%22%3A%22globalrelevanceex%22%7D%2C%22sf%22%3A%7B%22value%22%3Afalse%7D%2C%22tow%22%3A%7B%22value%22%3Afalse%7D%2C%22mf%22%3A%7B%22value%22%3Afalse%7D%2C%22con%22%3A%7B%22value%22%3Afalse%7D%2C%22apa%22%3A%7B%22value%22%3Afalse%7D%2C%22manu%22%3A%7B%22value%22%3Afalse%7D%2C%22apco%22%3A%7B%22value%22%3Afalse%7D%2C%22rs%22%3A%7B%22value%22%3Atrue%7D%2C%22fsba%22%3A%7B%22value%22%3Afalse%7D%2C%22fsbo%22%3A%7B%22value%22%3Afalse%7D%2C%22nc%22%3A%7B%22value%22%3Afalse%7D%2C%22cmsn%22%3A%7B%22value%22%3Afalse%7D%2C%22auc%22%3A%7B%22value%22%3Afalse%7D%2C%22fore%22%3A%7B%22value%22%3Afalse%7D%7D%2C%22isListVisible%22%3Atrue%7D&category=SEMANTIC"
+def fetch_zillow_data(page: WebPage, north: float, south: float, east: float, west: float) -> Tuple[List[Dict], List[Dict]]:
+    def get_url_for_page(page_num: Optional[int] = None) -> str:
+        """
+        Generate Zillow search URL with optional pagination
+        
+        Args:
+            page_num: Optional page number for pagination. If None, no pagination is included.
+            
+        Returns:
+            str: Zillow search URL
+        """
+        # Base search query state
+        search_query_state = {
+            "isMapVisible": True,
+            "mapBounds": {
+                "west": west,
+                "east": east,
+                "south": south,
+                "north": north
+            },
+            "mapZoom": 14,
+            "filterState": {
+                "sort": {"value": "globalrelevanceex"},
+                "sf": {"value": False},
+                "tow": {"value": False},
+                "mf": {"value": False},
+                "con": {"value": False},
+                "apa": {"value": False},
+                "manu": {"value": False},
+                "apco": {"value": False},
+                "rs": {"value": True},
+                "fsba": {"value": False},
+                "fsbo": {"value": False},
+                "nc": {"value": False},
+                "cmsn": {"value": False},
+                "auc": {"value": False},
+                "fore": {"value": False}
+            },
+            "isListVisible": True
+        }
+        
+        # Add pagination if page number is provided
+        if page_num is not None:
+            search_query_state["pagination"] = {"currentPage": page_num}
+        
+        # Convert to JSON and encode for URL
+        import json
+        encoded_state = json.dumps(search_query_state).replace('"', '%22').replace(' ', '').replace(':', '%3A').replace(',', '%2C').replace('{', '%7B').replace('}', '%7D')
+        
+        return f"https://www.zillow.com/homes/recently_sold/?searchQueryState={encoded_state}&category=SEMANTIC"
 
     url = "https://zillow-com1.p.rapidapi.com/searchByUrl"
     headers = {
@@ -301,30 +410,23 @@ def fetch_zillow_data(page: WebPage, north: float, south: float, east: float, we
     }
 
     all_homes = []
+    potential_homes = []
     current_page = 1
     total_pages = None
-
+    
+    # Get the base URL without pagination for returning to the frontend
+    base_search_url = get_url_for_page()  # No page number
+    
     while total_pages is None or current_page <= total_pages:
+        # Get URL with pagination for API requests
         zillow_url = get_url_for_page(current_page)
         querystring = {"url": zillow_url}
 
         try:
             response = requests.get(url, headers=headers, params=querystring)
-            
-            # Save the response to a file for inspection
-            with open(f"zillow_response_page_{current_page}.json", "w") as f:
-                f.write(response.text)
-            
             response.raise_for_status()
             data = response.json()
-            
-            if 'props' in data:
-                if len(data['props']) > 0:
-                    # Log the first property to see its structure
-                    first_prop = data['props'][0]
-            else:
-                logging.warning("No 'props' key found in response")
-                
+
             if total_pages is None:
                 total_pages = data.get('totalPages', 1)
 
@@ -333,55 +435,101 @@ def fetch_zillow_data(page: WebPage, north: float, south: float, east: float, we
                     price = property_data.get('price')
                     lot_acres = property_data.get('lotAreaValue')
                     lot_area_unit = property_data.get('lotAreaUnit', '').lower()
+                    zpid = property_data.get('zpid')
 
-                    # Log the key property data
+                    if not lot_acres or not zpid:
+                        logging.info("Skipping property: Missing lot area or ZPID")
+                        continue
 
-                    if not price:
-                        logging.info("Skipping property: No price")
-                        continue
-                    if not lot_acres:
-                        logging.info("Skipping property: No lot area value")
-                        continue
-                    if lot_area_unit != 'acres':
-                        # Try to handle square feet
-                        if lot_area_unit == 'sqft':
-                            lot_acres = float(lot_acres) / 43560
-                            logging.info(f"Converted {lot_acres * 43560} sqft to {lot_acres} acres")
-                        else:
-                            logging.info(f"Skipping property: Unsupported lot area unit: {lot_area_unit}")
-                            continue
+                    if lot_area_unit == 'sqft':
+                        lot_acres = float(lot_acres) / 43560
 
                     property_dict = {
                         "address": f"{property_data.get('streetAddress', '')}, {property_data.get('city', '')}, {property_data.get('state', '')} {property_data.get('zipcode', '')}",
-                        "price": float(price),
-                        "price_text": f"${price:,.2f}",
-                        "beds": str(property_data.get('bedrooms', 'N/A')),  
-                        "baths": str(property_data.get('bathrooms', 'N/A')),  
+                        "price": float(price) if price else None,
+                        "price_text": f"${price:,.2f}" if price else "N/A",
+                        "beds": str(property_data.get('bedrooms', 'N/A')),
+                        "baths": str(property_data.get('bathrooms', 'N/A')),
                         "sqft": str(property_data.get('livingArea', 'N/A')),
                         "lot_size": f"{lot_acres:.2f} acres",
                         "acreage": float(lot_acres),
-                        "price_per_acre": float(price) / float(lot_acres) if lot_acres > 0 else None,
+                        "price_per_acre": float(price) / float(lot_acres) if price and lot_acres > 0 else None,
                         "date_sold": property_data.get('dateSold'),
                         "home_type": property_data.get('homeType'),
                         "latitude": property_data.get('latitude'),
-                        "longitude": property_data.get('longitude')
+                        "longitude": property_data.get('longitude'),
+                        "zpid": zpid
                     }
-                    
-                    logging.info(f"Added property: {property_dict['address']}")
-                    all_homes.append(property_dict)
-                
+
+                    if price:
+                        logging.info(f"Added property with price: {property_dict['address']}")
+                        all_homes.append(property_dict)
+                    else:
+                        logging.info(f"Stored potential property without price: {property_dict['address']}")
+                        potential_homes.append(property_dict)
+
                 except Exception as e:
                     logging.warning(f"Error processing property data: {e}")
                     continue
 
             current_page += 1
-            
+            if current_page <= total_pages:
+                time.sleep(5)  # Delay to avoid rate limit
+
         except Exception as e:
             logging.error(f"Error fetching data from Zillow API on page {current_page}: {e}")
-            logging.error(traceback.format_exc())
             break
 
-    return all_homes
+    return all_homes, potential_homes, base_search_url
+
+API_KEYS = [
+    "0175965f55msh818f681aee07526p177aaejsnc9b3caa29390",
+    # Add additional API keys here
+]
+
+def get_api_key():
+    """Return a random API key from the pool"""
+    return random.choice(API_KEYS)
+
+def fetch_price_history(zpid: str, max_retries: int = 3) -> Optional[float]:
+    url = "https://zillow-com1.p.rapidapi.com/property"
+    params = {"zpid": zpid}
+    
+    for retry in range(max_retries):
+        # Get a random API key for each request
+        headers = {
+            "x-rapidapi-host": "zillow-com1.p.rapidapi.com",
+            "x-rapidapi-key": get_api_key()
+        }
+    
+    for retry in range(max_retries):
+        try:
+            response = requests.get(url, headers=headers, params=params)
+            if response.status_code == 429:
+                # Calculate exponential backoff with jitter
+                wait_time = (2 ** retry) + random.uniform(0, 1)
+                logging.info(f"Rate limit hit for ZPID {zpid}. Retrying in {wait_time:.2f} seconds...")
+                time.sleep(wait_time)
+                continue
+                
+            response.raise_for_status()
+            data = response.json()
+            price_history = data.get("priceHistory", [])
+            for event in price_history:
+                price = event.get("price")
+                if price and price > 0:
+                    logging.info(f"Fetched price {price} from history for ZPID {zpid}")
+                    return float(price)
+            logging.info(f"No valid price found in history for ZPID {zpid}")
+            return None
+        except Exception as e:
+            if retry < max_retries - 1:
+                wait_time = (2 ** retry) + random.uniform(0, 1)
+                logging.warning(f"Error fetching price history for ZPID {zpid}: {e}. Retrying in {wait_time:.2f} seconds...")
+                time.sleep(wait_time)
+            else:
+                logging.error(f"Error fetching price history for ZPID {zpid}: {e}")
+                return None
 
 def filter_properties_by_acreage(properties: List[Dict], target_acreage: float) -> List[Dict]:
     min_acreage = target_acreage * MIN_ACREAGE_RATIO
@@ -479,51 +627,66 @@ def find_comparable_properties(
     latitude: float, 
     longitude: float, 
     target_acreage: float
-) -> Tuple[List[Dict], List[Dict], float]:
+) -> Tuple[List[Dict], List[Dict], float, int, str]:
     search_radius = INITIAL_SEARCH_RADIUS_MILES
-    all_properties = []
+    all_homes = []
+    potential_homes = []
     final_radius = search_radius
-    
+    search_url = ""
+
     while search_radius <= MAX_SEARCH_RADIUS_MILES:
+        north, south, east, west = calculate_bounding_box(latitude, longitude, search_radius)
+        homes_with_price, homes_without_price, current_search_url = fetch_zillow_data(page, north, south, east, west)
         
-        north, south, east, west = calculate_bounding_box(
-            latitude, longitude, search_radius
-        )
+        # Save the search URL from the first successful fetch
+        if not search_url and current_search_url:
+            search_url = current_search_url
         
-        properties = fetch_zillow_data(page, north, south, east, west)
-        
-        filtered_properties = filter_properties_by_acreage(properties, target_acreage)
-        
-        all_properties.extend(filtered_properties)
-        
-        unique_properties = []
-        addresses = set()
-        for prop in all_properties:
-            if prop["address"] not in addresses:
-                unique_properties.append(prop)
-                addresses.add(prop["address"])
-        
-        all_properties = unique_properties
-        
-        if len(all_properties) >= MIN_COMPARABLE_PROPERTIES:
+        all_homes.extend(homes_with_price)
+        potential_homes.extend(homes_without_price)
+
+        # Deduplicate based on address
+        all_homes = list({prop['address']: prop for prop in all_homes}.values())
+        potential_homes = list({prop['address']: prop for prop in potential_homes}.values())
+
+        filtered_homes = filter_properties_by_acreage(all_homes, target_acreage)
+        if len(filtered_homes) >= MIN_COMPARABLE_PROPERTIES:
             final_radius = search_radius
             break
-        
+
         search_radius += SEARCH_RADIUS_INCREMENT
-    
-    # Even if we didn't reach MIN_COMPARABLE_PROPERTIES, use whatever we found
+
     final_radius = search_radius if search_radius <= MAX_SEARCH_RADIUS_MILES else MAX_SEARCH_RADIUS_MILES
-    
-    valid_properties, outlier_properties = detect_outliers_iqr(all_properties)
-    
-    # If we have very few properties, don't try to detect outliers
-    if len(all_properties) < 4:
-        valid_properties = all_properties
+    filtered_homes = filter_properties_by_acreage(all_homes, target_acreage)
+    potential_filtered = filter_properties_by_acreage(potential_homes, target_acreage)
+
+    total_comparables_found = len(filtered_homes) + len(potential_filtered)
+
+    # Fetch price history if not enough comparable properties
+    if len(filtered_homes) < MIN_COMPARABLE_PROPERTIES:
+        for prop in potential_filtered:
+            if len(filtered_homes) >= MIN_COMPARABLE_PROPERTIES:
+                break
+            price = fetch_price_history(prop['zpid'])
+            if price:
+                prop['price'] = price
+                prop['price_text'] = f"${price:,.2f}"
+                prop['price_per_acre'] = price / prop['acreage'] if prop['acreage'] > 0 else None
+                filtered_homes.append(prop)
+                logging.info(f"Added property with price from history: {prop['address']}")
+            
+            # Add a longer delay between API calls to avoid rate limiting
+            time.sleep(random.uniform(3, 5))  # Random delay between 3-5 seconds
+
+    valid_properties, outlier_properties = detect_outliers_iqr(filtered_homes)
+
+    if len(filtered_homes) < 4:
+        valid_properties = filtered_homes
         outlier_properties = []
-    
+
     logging.info(f"Final result: {len(valid_properties)} valid properties and {len(outlier_properties)} outliers")
     
-    return valid_properties, outlier_properties, final_radius
+    return valid_properties, outlier_properties, final_radius, total_comparables_found, search_url
 
 def clean_apn(apn: str) -> str:
     """
@@ -544,6 +707,25 @@ async def health_check():
 @app.post("/valuate-property", response_model=ValuationResponse)
 async def valuate_property(property_request: PropertyRequest):
     cleaned_apn = clean_apn(property_request.apn)
+
+    # Generate cache key
+    cache_key = generate_cache_key(property_request)
+    
+    # Check cache first
+    cached_result = redis_client.get(cache_key)
+    if cached_result:
+        logging.info(f"Cache hit for {cache_key}")
+        try:
+            # Parse the cached data
+            cached_data = json.loads(cached_result)
+            # Add any missing fields with default values
+            if 'search_url' not in cached_data:
+                cached_data['search_url'] = None
+            return ValuationResponse(**cached_data)
+        except Exception as e:
+            logging.warning(f"Error parsing cached data: {str(e)}. Proceeding with fresh valuation.")
+            # Continue with the rest of the function if there's an error with the cached data
+    
     page = initialize_webpage()
     
     try:
@@ -564,24 +746,35 @@ async def valuate_property(property_request: PropertyRequest):
             raise HTTPException(status_code=404, detail="Property coordinates not found")
                 
         latitude, longitude = coordinates
-        valid_properties, outlier_properties, final_radius = find_comparable_properties(
+        valid_properties, outlier_properties, final_radius, total_comparables_found, search_url = find_comparable_properties(
             page, latitude, longitude, target_acreage
         )
         
         valuation_results = calculate_property_value(target_acreage, valid_properties)
         
-        return ValuationResponse(
+        valuation_response = ValuationResponse(
             target_property=f"APN# {cleaned_apn}, {property_request.county}, {property_request.state}",
             target_acreage=target_acreage,
             search_radius_miles=final_radius,
+            total_comparables_found=total_comparables_found, 
             comparable_count=valuation_results['comparable_count'],
             estimated_value_avg=valuation_results['estimated_value_avg'],
             estimated_value_median=valuation_results['estimated_value_median'],
             price_per_acre_stats=ValuationStats(**valuation_results['price_per_acre_stats']) if valuation_results['price_per_acre_stats'] else None,
             comparable_properties=[ComparableProperty(**prop) for prop in valid_properties],
-            outlier_properties=[ComparableProperty(**prop) for prop in outlier_properties]
+            outlier_properties=[ComparableProperty(**prop) for prop in outlier_properties],
+            search_url=search_url  # Add the search URL to the response
+        )
+
+        # Cache the result for future use (e.g., 24 hours)
+        redis_client.setex(
+            cache_key, 
+            24 * 60 * 60,  # 24 hours in seconds
+            json.dumps(valuation_response.model_dump())
         )
         
+        return valuation_response
+    
     except Exception as e:
         error_trace = traceback.format_exc()
         logging.error(f"Detailed error trace:\n{error_trace}")
