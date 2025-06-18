@@ -69,6 +69,8 @@ class ValuationStats(BaseModel):
 class ValuationResponse(BaseModel):
     target_property: str
     target_acreage: float
+    target_latitude: Optional[float] = None  
+    target_longitude: Optional[float] = None 
     search_radius_miles: float
     total_comparables_found: int 
     comparable_count: int
@@ -755,6 +757,8 @@ async def valuate_property(property_request: PropertyRequest):
         valuation_response = ValuationResponse(
             target_property=f"APN# {cleaned_apn}, {property_request.county}, {property_request.state}",
             target_acreage=target_acreage,
+            target_latitude=latitude,  
+            target_longitude=longitude,
             search_radius_miles=final_radius,
             total_comparables_found=total_comparables_found, 
             comparable_count=valuation_results['comparable_count'],
@@ -763,7 +767,7 @@ async def valuate_property(property_request: PropertyRequest):
             price_per_acre_stats=ValuationStats(**valuation_results['price_per_acre_stats']) if valuation_results['price_per_acre_stats'] else None,
             comparable_properties=[ComparableProperty(**prop) for prop in valid_properties],
             outlier_properties=[ComparableProperty(**prop) for prop in outlier_properties],
-            search_url=search_url  # Add the search URL to the response
+            search_url=search_url  
         )
 
         # Cache the result for future use (e.g., 24 hours)
