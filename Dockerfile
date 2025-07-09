@@ -30,11 +30,15 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy application code
+# Copy startup script first and make it executable
+COPY start.sh .
+RUN chmod +x start.sh
+
+# Copy rest of application code
 COPY . .
 
-# Expose port for Elastic Beanstalk
+# Expose port
 EXPOSE 8000
 
-# Start Redis server and Xvfb with the FastAPI app
-CMD ["sh", "-c", "redis-server & Xvfb :99 -screen 0 1024x768x16 & uvicorn main:app --host 0.0.0.0 --port 8000 --timeout-keep-alive 300"]
+# Use the startup script
+CMD ["./start.sh"]
