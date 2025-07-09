@@ -3,24 +3,23 @@ version: '3.8'
 services:
   app:
     build: .
-    ports:
-      - "8000:8000"
     environment:
       - REDIS_URL=redis://redis:6379
     depends_on:
       - redis
     deploy:
-      replicas: 3  # Run multiple instances
+      replicas: 3
       resources:
         limits:
-          memory: 4G  # Increase from 2G
-          cpus: '2.0'  # Increase CPU allocation
+          memory: 4G
+          cpus: '2.0'
     restart: unless-stopped
+    # No ports - nginx handles external access
     
   redis:
     image: redis:7-alpine
     ports:
-      - "6379:6379"
+      - "6380:6379"  # Use different port to avoid system Redis conflict
     volumes:
       - redis_data:/data
     restart: unless-stopped
@@ -28,7 +27,7 @@ services:
   nginx:
     image: nginx:alpine
     ports:
-      - "80:80"
+      - "8000:80"  # External access via port 8000
     volumes:
       - ./nginx.conf:/etc/nginx/nginx.conf
     depends_on:

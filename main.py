@@ -127,8 +127,12 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Redis connection
-redis_client = redis.Redis(host='localhost', port=6379, db=0)
+# Redis connection - use service name for containerized Redis
+redis_client = redis.Redis(host='redis', port=6379, db=0, decode_responses=True)
+
+# Update rate limiter to use Redis for distributed limiting
+from rate_limiter import api_rate_limiter
+api_rate_limiter.redis_client = redis_client
 
 def generate_cache_key(property_request: PropertyRequest) -> str:
     cache_key_str = f"{property_request.apn}_{property_request.county}_{property_request.state}"
