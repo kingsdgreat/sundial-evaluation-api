@@ -650,10 +650,16 @@ async def valuate_property(property_request: PropertyRequest):
     async with REQUEST_SEMAPHORE:
         return await _process_valuation(property_request)
 
+
 async def _process_valuation(property_request: PropertyRequest):
+    """
+    Process a property valuation request, fetching data from Propstream and Zillow.
+    Uses cached results if available and stores new results in Redis.
+    """
     cleaned_apn = clean_apn(property_request.apn)
     cache_key = generate_cache_key(property_request)
     
+    # Check Redis cache for existing valuation
     cached_result = redis_client.get(cache_key)
     if cached_result:
         logging.info(f"Cache hit for {cache_key}")
@@ -665,66 +671,91 @@ async def _process_valuation(property_request: PropertyRequest):
         except Exception as e:
             logging.warning(f"Error parsing cached data: {str(e)}. Proceeding with fresh valuation.")
     
+    # Acquire rate limit slot
+    rate_limit_key = f"valuation:{cleaned_apn}"
+    if not await api_rate_limiter.acquire(rate_limit_key):
+        logging.warning(f"Rate limit exceeded for {rate_limit_key}")
+        raise HTTPException(status_code=429, detail="Rate limit exceeded, please try again later")
+
     async with browser_pool.get_browser() as page:
         try:
+            # Login to Propstream
             await asyncio.get_event_loop().run_in_executor(
                 None, 
                 login_to_propstream, 
                 page, EMAIL, PASSWORD
             )
             logging.info("Login successful")
-            
-                        await asyncio.get_event_loop().run_in_executor(
+
+            # Search for the target property
+            await asyncio.get_event_loop().run_in_executor(
                 None,
                 search_property,
                 page, ADDRESS_FORMAT, cleaned_apn, 
                 property_request.county, property_request.state
             )
             logging.info("Property search completed")
-            
+
+            # Extract property information
             target_property_info = await asyncio.get_event_loop().run_in_executor(
                 None, extract_property_info, page
             )
-            
-            target_acreage = target_property_info.get("acreage", 1.0) if target_property_info else 1.0
-            
+            if not target_property_info:
+                logging.error("Failed to extract target property info")
+                raise HTTPException(status_code=500, detail="Failed to extract target property information")
+
+            target_acreage = target_property_info.get("acreage", 1.0)
+
+            # Extract coordinates
             coordinates = await asyncio.get_event_loop().run_in_executor(
                 None, extract_coordinates, page.html
             )
             if not coordinates:
+                logging.error("Property coordinates not found")
                 raise HTTPException(status_code=404, detail="Property coordinates not found")
-                    
+
             latitude, longitude = coordinates
+
+            # Fetch comparable properties from Zillow
             valid_properties, outlier_properties, final_radius, total_comparables_found, search_url = await asyncio.get_event_loop().run_in_executor(
                 None, find_comparable_properties, page, latitude, longitude, target_acreage
             )
-            
+
+            # Calculate valuation based on comparable properties
             valuation_results = calculate_property_value(target_acreage, valid_properties)
             
+            # Prepare response
             valuation_response = ValuationResponse(
                 target_property=f"APN# {cleaned_apn}, {property_request.county}, {property_request.state}",
                 target_acreage=target_acreage,
-                target_latitude=latitude,  
+                target_latitude=latitude,
                 target_longitude=longitude,
                 search_radius_miles=final_radius,
-                total_comparables_found=total_comparables_found, 
+                total_comparables_found=total_comparables_found,
                 comparable_count=valuation_results['comparable_count'],
                 estimated_value_avg=valuation_results['estimated_value_avg'],
                 estimated_value_median=valuation_results['estimated_value_median'],
                 price_per_acre_stats=ValuationStats(**valuation_results['price_per_acre_stats']) if valuation_results['price_per_acre_stats'] else None,
                 comparable_properties=[ComparableProperty(**prop) for prop in valid_properties],
                 outlier_properties=[ComparableProperty(**prop) for prop in outlier_properties],
-                search_url=search_url  
+                search_url=search_url
             )
 
-            redis_client.setex(
-                cache_key, 
-                24 * 60 * 60,
-                json.dumps(valuation_response.model_dump())
-            )
-            
+            # Cache the response in Redis
+            try:
+                redis_client.setex(
+                    cache_key,
+                    settings.CACHE_EXPIRATION,  # Use configured cache expiration
+                    json.dumps(valuation_response.model_dump())
+                )
+                logging.info(f"Cached valuation response for {cache_key}")
+            except Exception as e:
+                logging.warning(f"Failed to cache valuation response: {str(e)}")
+
             return valuation_response
-        
+
+        except HTTPException:
+            raise  # Re-raise HTTP exceptions to be handled by FastAPI
         except Exception as e:
             error_trace = traceback.format_exc()
             logging.error(f"Detailed error trace:\n{error_trace}")
