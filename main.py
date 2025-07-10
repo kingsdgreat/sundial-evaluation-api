@@ -202,6 +202,9 @@ def get_cached_state_abbreviation(state: str) -> str:
     return get_state_abbreviation(state)
 
 def search_property(page: WebPage, address_format: str, apn: str, county: str, state: str) -> None:
+    """
+    Search for a property on Propstream using the provided address details.
+    """
     state_abbr = get_cached_state_abbreviation(state)
     county = county.strip()
     
@@ -214,49 +217,64 @@ def search_property(page: WebPage, address_format: str, apn: str, county: str, s
 
     address = address_format.format(apn, county, state_abbr)
     
-    try:
-        logging.info(f"Searching for address: {address}")
-        
-        time.sleep(7)
-        search_input = page.ele("@type=text")
-        if not search_input:
-            raise Exception("Search input field not found")
+    max_retries = 3
+    retry_delay = 5  # seconds
+    
+    for attempt in range(max_retries):
+        try:
+            logging.info(f"Searching for address: {address} (Attempt {attempt + 1}/{max_retries})")
             
-        search_input.input(address)
-        logging.info("Address entered in search")
-        
-        time.sleep(3)
-        result = page.ele(f"@text()={address}")
-        if not result:
-            raise Exception("Search result not found")
-        
-        time.sleep(3)
-        result = page.ele(f"@text()={address}")
-        if not result:
-            raise Exception("Search result not found")
+            # Navigate to the search page
+            page.get("https://app.propstream.com/properties")  # Ensure we're on the properties page
+            page.wait.load_start()
+            time.sleep(3)  # Allow initial page load
+
+            # Wait for and locate the search input field
+            search_input = page.ele('xpath://input[@type="text" or @name="search" or contains(@class, "search")]', timeout=10)
+            if not search_input:
+                raise Exception("Search input field not found")
             
-        result.click()
-        logging.info("Search result clicked")
-        
-        time.sleep(5)
-        property_link = page.ele('xpath://*[@id="root"]/div/div[2]/div/div/div[3]/div[1]/div/section/div[2]/div/div/div/div/div[1]/h3/a')
-        if not property_link:
-            raise Exception("Property details link not found")
+            search_input.input(address)
+            logging.info("Address entered in search")
             
-        property_link.click()
-        logging.info("Property details opened")
-        
-        time.sleep(5)
-        location_pin = page.ele('xpath://*[@id="propertyDetail"]/div/div/div[2]/div/div/div/div[1]/div[1]/div/div/div/div/div[1]/div[1]/div')
-        if not location_pin:
-            raise Exception("Location pin not found")
+            time.sleep(3)  # Wait for search results to load
             
-        location_pin.click()
-        logging.info("Location pin clicked")
+            result = page.ele(f"@text()={address}", timeout=10)
+            if not result:
+                raise Exception("Search result not found")
+            
+            result.click()
+            logging.info("Search result clicked")
+            
+            time.sleep(5)  # Wait for property details page to load
+            
+            property_link = page.ele('xpath://*[@id="root"]/div/div[2]/div/div/div[3]/div[1]/div/section/div[2]/div/div/div/div/div[1]/h3/a', timeout=10)
+            if not property_link:
+                raise Exception("Property details link not found")
+            
+            property_link.click()
+            logging.info("Property details opened")
+            
+            time.sleep(5)  # Wait for details page to fully load
+            
+            location_pin = page.ele('xpath://*[@id="propertyDetail"]/div/div/div[2]/div/div/div/div[1]/div[1]/div/div/div/div/div[1]/div[1]/div', timeout=10)
+            if not location_pin:
+                raise Exception("Location pin not found")
+            
+            location_pin.click()
+            logging.info("Location pin clicked")
+            
+            return  # Success, exit the function
         
-    except Exception as e:
-        logging.error(f"Property search failed: {str(e)}")
-        raise
+        except Exception as e:
+            logging.warning(f"Attempt {attempt + 1} failed: {str(e)}")
+            if attempt < max_retries - 1:
+                logging.info(f"Retrying in {retry_delay} seconds...")
+                time.sleep(retry_delay)
+                page.refresh()  # Refresh the page to reset state
+            else:
+                logging.error(f"Property search failed after {max_retries} attempts: {str(e)}")
+                raise
 
 def extract_coordinates(html: str) -> Optional[Tuple[float, float]]:
     soup = BeautifulSoup(html, "html.parser")
