@@ -128,7 +128,8 @@ app.add_middleware(
 )
 
 # Redis connection - use service name for containerized Redis
-redis_client = redis.Redis(host='redis', port=6379, db=0, decode_responses=True)
+# redis_client = redis.Redis(host='redis', port=6379, db=0, decode_responses=True)
+redis_client = redis.Redis(host='127.0.0.1', port=6379, db=0, decode_responses=True)
 
 # Update rate limiter to use Redis for distributed limiting
 from rate_limiter import api_rate_limiter
@@ -218,63 +219,100 @@ def search_property(page: WebPage, address_format: str, apn: str, county: str, s
     address = address_format.format(apn, county, state_abbr)
     
     max_retries = 3
-    retry_delay = 5  # seconds
+    retry_delay = 7  # Increased from 5 to 7 seconds
     
     for attempt in range(max_retries):
         try:
             logging.info(f"Searching for address: {address} (Attempt {attempt + 1}/{max_retries})")
             
             # Navigate to the search page
-            page.get("https://app.propstream.com/properties")  # Ensure we're on the properties page
+            page.get("https://app.propstream.com/properties")
             page.wait.load_start()
-            time.sleep(3)  # Allow initial page load
-
-            # Wait for and locate the search input field
-            search_input = page.ele('xpath://input[@type="text" or @name="search" or contains(@class, "search")]', timeout=10)
+            logging.info("Navigated to properties page")
+            
+            # Wait for document and dynamic content to load
+            page.wait.doc_loaded(timeout=20)
+            page.run_js("window.scrollTo(0, document.body.scrollHeight);")  # Trigger potential lazy-loading
+            time.sleep(5)  # Increased wait time for dynamic content
+            
+            # Log page state
+            logging.debug(f"Page title: {page.title}")
+            logging.debug(f"Page URL: {page.url}")
+            
+            # Locate search input field
+            search_input = page.ele('xpath://input[@type="text" or @name="search" or contains(@class, "search") or @placeholder[contains(., "search")]]', timeout=15)
             if not search_input:
+                logging.error(f"Search input not found. Page HTML: {page.html[:2000]}...")
                 raise Exception("Search input field not found")
             
             search_input.input(address)
             logging.info("Address entered in search")
             
-            time.sleep(3)  # Wait for search results to load
+            # Locate and click search button
+            search_button = page.ele('xpath://button[contains(@class, "search") or @type="submit" or contains(text(), "Search")]', timeout=10)
+            if search_button:
+                search_button.click()
+                logging.info("Search button clicked")
+            else:
+                logging.warning("Search button not found, attempting Enter key")
+                search_input.input('\n')  # Simulate Enter key
             
-            result = page.ele(f"@text()={address}", timeout=10)
+            # Wait for search results to load
+            page.wait.doc_loaded(timeout=20)
+            time.sleep(5)  # Increased wait time
+            
+            # Log all potential search result elements
+            result_elements = page.eles('xpath://*[contains(@class, "result") or contains(@class, "property") or contains(text(), "APN") or contains(text(), "County")]')
+            logging.debug(f"Found {len(result_elements)} potential search result elements")
+            for i, elem in enumerate(result_elements):
+                logging.debug(f"Result element {i+1}: {elem.text[:100]}...")
+            
+            # Try to find the search result
+            result = page.ele(f'xpath://*[contains(text(), "{apn}") or contains(text(), "{county}") or contains(text(), "{state_abbr}")]', timeout=15)
             if not result:
+                logging.error(f"Search result not found for {address}. Page HTML: {page.html[:2000]}...")
                 raise Exception("Search result not found")
             
+            logging.debug(f"Found search result: {result.text[:100]}...")
             result.click()
             logging.info("Search result clicked")
             
-            time.sleep(5)  # Wait for property details page to load
+            page.wait.doc_loaded(timeout=20)
             
-            property_link = page.ele('xpath://*[@id="root"]/div/div[2]/div/div/div[3]/div[1]/div/section/div[2]/div/div/div/div/div[1]/h3/a', timeout=10)
+            # Locate property details link
+            property_link = page.ele('xpath://*[@id="root"]/div/div[2]/div/div/div[3]/div[1]/div/section/div[2]/div/div/div/div/div[1]/h3/a', timeout=15)
             if not property_link:
+                logging.error(f"Property details link not found. Page HTML: {page.html[:2000]}...")
                 raise Exception("Property details link not found")
             
             property_link.click()
             logging.info("Property details opened")
             
-            time.sleep(5)  # Wait for details page to fully load
+            page.wait.doc_loaded(timeout=20)
             
-            location_pin = page.ele('xpath://*[@id="propertyDetail"]/div/div/div[2]/div/div/div/div[1]/div[1]/div/div/div/div/div[1]/div[1]/div', timeout=10)
+            # Locate location pin
+            location_pin = page.ele('xpath://*[@id="propertyDetail"]/div/div/div[2]/div/div/div/div[1]/div[1]/div/div/div/div/div[1]/div[1]/div', timeout=15)
             if not location_pin:
+                logging.error(f"Location pin not found. Page HTML: {page.html[:2000]}...")
                 raise Exception("Location pin not found")
             
             location_pin.click()
             logging.info("Location pin clicked")
             
-            return  # Success, exit the function
+            return
         
         except Exception as e:
             logging.warning(f"Attempt {attempt + 1} failed: {str(e)}")
             if attempt < max_retries - 1:
                 logging.info(f"Retrying in {retry_delay} seconds...")
                 time.sleep(retry_delay)
-                page.refresh()  # Refresh the page to reset state
+                page.refresh()
             else:
                 logging.error(f"Property search failed after {max_retries} attempts: {str(e)}")
-                raise
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"No search results found for APN# {apn}, {county}, {state_abbr}"
+                )
 
 def extract_coordinates(html: str) -> Optional[Tuple[float, float]]:
     soup = BeautifulSoup(html, "html.parser")
