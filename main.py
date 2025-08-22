@@ -225,79 +225,117 @@ def search_property(page: WebPage, address_format: str, apn: str, county: str, s
         try:
             logging.info(f"Searching for address: {address} (Attempt {attempt + 1}/{max_retries})")
             
-            # Navigate to the search page
-            page.get("https://app.propstream.com/properties")
+            # Navigate to the search page (correct URL based on the images)
+            page.get("https://app.propstream.com/search")
             page.wait.load_start()
-            logging.info("Navigated to properties page")
+            logging.info("Navigated to search page")
             
             # Wait for document and dynamic content to load
             page.wait.doc_loaded(timeout=20)
-            page.run_js("window.scrollTo(0, document.body.scrollHeight);")  # Trigger potential lazy-loading
-            time.sleep(5)  # Increased wait time for dynamic content
+            time.sleep(5)  # Wait for dynamic content
             
             # Log page state
             logging.debug(f"Page title: {page.title}")
             logging.debug(f"Page URL: {page.url}")
             
-            # Locate search input field
-            search_input = page.ele('xpath://input[@type="text" or @name="search" or contains(@class, "search") or @placeholder[contains(., "search")]]', timeout=15)
+            # Locate search input field - based on the image, it's a prominent search bar
+            search_input = page.ele('xpath://input[@placeholder="Enter County, City, Zip Code(s) or APN #"]', timeout=15)
             if not search_input:
-                logging.error(f"Search input not found. Page HTML: {page.html[:2000]}...")
-                raise Exception("Search input field not found")
+                # Fallback to more generic selectors
+                search_input = page.ele('xpath://input[@type="text" or @name="search" or contains(@class, "search") or @placeholder[contains(., "search")]]', timeout=15)
+                if not search_input:
+                    logging.error(f"Search input not found. Page HTML: {page.html[:2000]}...")
+                    raise Exception("Search input field not found")
             
+            # Clear any existing text and enter the address
+            search_input.clear()
             search_input.input(address)
             logging.info("Address entered in search")
             
-            # Locate and click search button
-            search_button = page.ele('xpath://button[contains(@class, "search") or @type="submit" or contains(text(), "Search")]', timeout=10)
-            if search_button:
-                search_button.click()
-                logging.info("Search button clicked")
-            else:
-                logging.warning("Search button not found, attempting Enter key")
-                search_input.input('\n')  # Simulate Enter key
+            # Press Enter to perform the search (this is more reliable than finding a button)
+            logging.info("Pressing Enter to perform search...")
+            search_input.input('\n')  # Simulate Enter key
             
             # Wait for search results to load
             page.wait.doc_loaded(timeout=20)
-            time.sleep(5)  # Increased wait time
+            time.sleep(10)  # Wait longer for search results to fully load
             
-            # Log all potential search result elements
-            result_elements = page.eles('xpath://*[contains(@class, "result") or contains(@class, "property") or contains(text(), "APN") or contains(text(), "County")]')
-            logging.debug(f"Found {len(result_elements)} potential search result elements")
-            for i, elem in enumerate(result_elements):
-                logging.debug(f"Result element {i+1}: {elem.text[:100]}...")
+            # Based on the image, after search we should see the results page with property details
+            logging.info("Looking for search results...")
             
-            # Try to find the search result
-            result = page.ele(f'xpath://*[contains(text(), "{apn}") or contains(text(), "{county}") or contains(text(), "{state_abbr}")]', timeout=15)
-            if not result:
-                logging.error(f"Search result not found for {address}. Page HTML: {page.html[:2000]}...")
-                raise Exception("Search result not found")
+            # Check if we're on the results page by looking for the property details panel
+            # The image shows property details in the right panel with "EST. VALUE" and other info
+            result_found = False
             
-            logging.debug(f"Found search result: {result.text[:100]}...")
-            result.click()
-            logging.info("Search result clicked")
+            # Wait a bit more for the page to fully render
+            time.sleep(5)
             
-            page.wait.doc_loaded(timeout=20)
+            # Look for the property details panel (right side of the page)
+            # The image shows this contains property information like "EST. VALUE $409,000"
+            property_panel = page.ele('xpath://div[contains(@class, "property") or contains(@class, "details") or contains(@class, "panel")]', timeout=15)
+            if property_panel:
+                logging.info("Property details panel found")
+                result_found = True
             
-            # Locate property details link
-            property_link = page.ele('xpath://*[@id="root"]/div/div[2]/div/div/div[3]/div[1]/div/section/div[2]/div/div/div/div/div[1]/h3/a', timeout=15)
-            if not property_link:
-                logging.error(f"Property details link not found. Page HTML: {page.html[:2000]}...")
-                raise Exception("Property details link not found")
+            # If not found, try looking for the map markers (left side of the page)
+            if not result_found:
+                # Look for map markers or property listings
+                markers = page.eles('xpath://div[contains(@class, "marker") or contains(@class, "property-marker") or contains(@style, "position")]')
+                if markers:
+                    logging.info(f"Found {len(markers)} potential property markers on map")
+                    # Click on the first marker
+                    try:
+                        markers[0].click()
+                        logging.info("Clicked on property marker")
+                        result_found = True
+                        time.sleep(3)  # Wait for details to load
+                    except Exception as e:
+                        logging.warning(f"Could not click marker: {e}")
             
-            property_link.click()
-            logging.info("Property details opened")
+            # If still not found, try to find by text content in the page
+            if not result_found:
+                # Look for the APN number or address in the page content
+                result = page.ele(f'xpath://*[contains(text(), "{apn}") or contains(text(), "{county}") or contains(text(), "{state_abbr}")]', timeout=10)
+                if result:
+                    try:
+                        result.click()
+                        logging.info("Found and clicked on property result")
+                        result_found = True
+                        time.sleep(3)
+                    except Exception as e:
+                        logging.warning(f"Could not click result: {e}")
             
-            page.wait.doc_loaded(timeout=20)
+            # If we still haven't found results, check if the search actually worked
+            if not result_found:
+                # Check if we're still on the search page or if we got results
+                current_url = page.url
+                logging.info(f"Current URL after search: {current_url}")
+                
+                # If we're still on the search page, the search might not have worked
+                if "search" in current_url.lower():
+                    logging.error("Still on search page - search may not have worked")
+                    raise Exception("Search did not produce results")
+                else:
+                    logging.info("URL changed, assuming search worked")
+                    result_found = True
             
-            # Locate location pin
-            location_pin = page.ele('xpath://*[@id="propertyDetail"]/div/div/div[2]/div/div/div/div[1]/div[1]/div/div/div/div/div[1]/div[1]/div', timeout=15)
-            if not location_pin:
-                logging.error(f"Location pin not found. Page HTML: {page.html[:2000]}...")
-                raise Exception("Location pin not found")
+            # Now look for the "Details" button to get more detailed information
+            # Based on the image, there's a "Details" button in the top right of the property panel
+            logging.info("Looking for Details button...")
+            details_button = page.ele('xpath://button[contains(text(), "Details")]', timeout=15)
+            if details_button:
+                try:
+                    details_button.click()
+                    logging.info("Details button clicked")
+                    page.wait.doc_loaded(timeout=20)
+                    time.sleep(5)  # Wait for details page to load
+                except Exception as e:
+                    logging.warning(f"Could not click Details button: {e}")
+            else:
+                logging.info("Details button not found - may already be on details page")
             
-            location_pin.click()
-            logging.info("Location pin clicked")
+            # Now we should be on the property detail page with all the information
+            logging.info("Property search and details navigation completed")
             
             return
         
@@ -316,6 +354,10 @@ def search_property(page: WebPage, address_format: str, apn: str, county: str, s
 
 def extract_coordinates(html: str) -> Optional[Tuple[float, float]]:
     soup = BeautifulSoup(html, "html.parser")
+    
+    # Try multiple methods to find coordinates
+    
+    # Method 1: Look for Google Maps links
     for a_tag in soup.find_all("a", href=True):
         href = a_tag["href"]
         if "maps.google.com/maps" in href and "ll=" in href:
@@ -325,6 +367,44 @@ def extract_coordinates(html: str) -> Optional[Tuple[float, float]]:
                     return float(match.group(1)), float(match.group(2))
                 except ValueError:
                     logging.warning("Failed to convert coordinates to float.")
+    
+    # Method 2: Look for data attributes that might contain coordinates
+    for element in soup.find_all(attrs={"data-lat": True, "data-lng": True}):
+        try:
+            lat = float(element.get("data-lat"))
+            lng = float(element.get("data-lng"))
+            return lat, lng
+        except (ValueError, TypeError):
+            continue
+    
+    # Method 3: Look for coordinates in script tags
+    for script in soup.find_all("script"):
+        if script.string:
+            # Look for latitude/longitude patterns
+            lat_match = re.search(r'"latitude":\s*([-+]?\d*\.\d+)', script.string)
+            lng_match = re.search(r'"longitude":\s*([-+]?\d*\.\d+)', script.string)
+            if lat_match and lng_match:
+                try:
+                    return float(lat_match.group(1)), float(lng_match.group(1))
+                except ValueError:
+                    continue
+    
+    # Method 4: Look for coordinates in the page URL or meta tags
+    for meta in soup.find_all("meta", attrs={"name": ["geo.position", "latitude", "longitude"]}):
+        content = meta.get("content", "")
+        if "latitude" in meta.get("name", "").lower():
+            try:
+                lat = float(content)
+                # Look for corresponding longitude
+                for lng_meta in soup.find_all("meta", attrs={"name": "longitude"}):
+                    try:
+                        lng = float(lng_meta.get("content", ""))
+                        return lat, lng
+                    except ValueError:
+                        continue
+            except ValueError:
+                continue
+    
     logging.warning("Coordinates not found in HTML.")
     return None
 
@@ -334,36 +414,100 @@ def extract_property_info(page: WebPage) -> Optional[Dict]:
         soup = BeautifulSoup(html, "html.parser")
         property_info = {}
         
-        lot_size_elem = soup.find(lambda tag: tag.name == "div" and "Lot Size" in tag.text)
-        if lot_size_elem:
-            lot_size_text = lot_size_elem.find_next("div").text.strip()
-            
-            if "acres" in lot_size_text.lower():
-                logging.info("Lot size is in acres format")
-                acreage_match = re.search(r"([\d.]+)\s*acres", lot_size_text.lower())
-                if acreage_match:
-                    property_info["acreage"] = float(acreage_match.group(1))
-            elif "sqft" in lot_size_text.lower() or "sq ft" in lot_size_text.lower():
-                logging.info("Lot size is in square feet format")
-                sqft_match = re.search(r"([\d,]+)\s*sq", lot_size_text.lower())
-                if sqft_match:
-                    sqft = float(sqft_match.group(1).replace(",", ""))
-                    property_info["acreage"] = sqft / 43560
-
-        value_elem = soup.find(lambda tag: tag.name == "div" and "Estimated Value" in tag.text)
-        if value_elem:
-            value_text = value_elem.find_next("div").text.strip()
-            
-            if "N/A" in value_text:
-                logging.info("Estimated value is N/A")
-            else:
-                value_match = re.search(r"\$?([\d,]+)", value_text)
-                if value_match and value_match.group(1):
-                    property_info["estimated_value"] = float(value_match.group(1).replace(",", ""))
-                else:
-                    logging.warning(f"Could not extract numeric value from: '{value_text}'")
+        logging.info("Extracting property information from PropStream page...")
         
+        # Based on the second image, look for property details in the right panel
+        # The image shows "EST. VALUE $409,000" prominently displayed
+        
+        # Method 1: Look for estimated value (most prominent in the image)
+        value_patterns = [
+            r"EST\.?\s*VALUE\s*\$?([\d,]+)",
+            r"Estimated\s+Value\s*\$?([\d,]+)",
+            r"\$([\d,]+)\s*EST\.?\s*VALUE",
+            r"Value:\s*\$?([\d,]+)"
+        ]
+        
+        for pattern in value_patterns:
+            value_match = re.search(pattern, html, re.IGNORECASE)
+            if value_match:
+                try:
+                    value_str = value_match.group(1).replace(",", "")
+                    property_info["estimated_value"] = float(value_str)
+                    logging.info(f"Found estimated value: ${property_info['estimated_value']:,.2f}")
+                    break
+                except ValueError:
+                    continue
+        
+        # Method 2: Look for lot size/acreage information
+        # The image shows "10,400 LOT" which suggests lot size
+        lot_patterns = [
+            r"(\d+(?:,\d+)?)\s*LOT",
+            r"Lot\s+Size[:\s]*([\d,]+)\s*(?:sq\s*ft|acres?)",
+            r"(\d+(?:\.\d+)?)\s*acres?",
+            r"(\d+(?:,\d+)?)\s*sq\s*ft"
+        ]
+        
+        for pattern in lot_patterns:
+            lot_match = re.search(pattern, html, re.IGNORECASE)
+            if lot_match:
+                try:
+                    lot_value = lot_match.group(1).replace(",", "")
+                    if "sq ft" in lot_match.group(0).lower():
+                        # Convert square feet to acres
+                        sqft = float(lot_value)
+                        property_info["acreage"] = sqft / 43560
+                        logging.info(f"Found lot size: {sqft:,.0f} sq ft ({property_info['acreage']:.2f} acres)")
+                    else:
+                        property_info["acreage"] = float(lot_value)
+                        logging.info(f"Found acreage: {property_info['acreage']:.2f} acres")
+                    break
+                except ValueError:
+                    continue
+        
+        # Method 3: Look for property details in structured elements
+        # Try to find elements with specific text patterns
+        for elem in soup.find_all(["div", "span", "p"]):
+            text = elem.get_text().strip()
+            
+            # Look for lot size information
+            if "lot" in text.lower() and any(char.isdigit() for char in text):
+                lot_match = re.search(r"(\d+(?:,\d+)?)\s*(?:sq\s*ft|acres?)", text, re.IGNORECASE)
+                if lot_match and "acreage" not in property_info:
+                    try:
+                        lot_value = lot_match.group(1).replace(",", "")
+                        if "sq ft" in text.lower():
+                            sqft = float(lot_value)
+                            property_info["acreage"] = sqft / 43560
+                        else:
+                            property_info["acreage"] = float(lot_value)
+                        logging.info(f"Found lot size from text: {text}")
+                    except ValueError:
+                        continue
+            
+            # Look for value information
+            if "value" in text.lower() and "$" in text:
+                value_match = re.search(r"\$([\d,]+)", text)
+                if value_match and "estimated_value" not in property_info:
+                    try:
+                        value_str = value_match.group(1).replace(",", "")
+                        property_info["estimated_value"] = float(value_str)
+                        logging.info(f"Found value from text: {text}")
+                    except ValueError:
+                        continue
+        
+        # If we still don't have acreage, set a default
+        if "acreage" not in property_info:
+            property_info["acreage"] = 1.0
+            logging.warning("No acreage found, using default value of 1.0 acres")
+        
+        # If we still don't have estimated value, set to None
+        if "estimated_value" not in property_info:
+            logging.warning("No estimated value found")
+            property_info["estimated_value"] = None
+        
+        logging.info(f"Extracted property info: {property_info}")
         return property_info
+        
     except Exception as e:
         logging.error(f"Failed to extract property info: {e}")
         logging.error(traceback.format_exc())

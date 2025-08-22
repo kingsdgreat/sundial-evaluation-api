@@ -25,7 +25,7 @@ class BrowserPool:
                 
     def _create_browser(self) -> WebPage:
         co = ChromiumOptions()
-        # co.headless(True)
+        co.headless(True)
         co.set_argument('--no-sandbox')
         co.set_argument('--disable-dev-shm-usage')
         co.set_argument('--disable-gpu')
