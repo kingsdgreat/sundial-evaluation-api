@@ -15,12 +15,13 @@ import traceback
 import redis
 import json
 import hashlib
+import os
 
 from bs4 import BeautifulSoup
 from DrissionPage import ChromiumOptions, WebPage
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
-from DrissionPage.errors import BrowserConnectError
+from DrissionPage.errors import BrowserConnectError, AlertExistsError
 from functools import lru_cache
 from typing import Optional
 from pydantic_settings import BaseSettings
@@ -102,12 +103,51 @@ import asyncio
 from browser_pool import browser_pool
 
 # Add semaphore to limit concurrent requests
-REQUEST_SEMAPHORE = asyncio.Semaphore(5)  # Max 5 concurrent requests
+REQUEST_SEMAPHORE = asyncio.Semaphore(3)  # Align with browser pool size
+
+# Per-browser login lock and flag map
+_browser_login_locks: Dict[int, asyncio.Lock] = {}
+_browser_logged_in: Dict[int, bool] = {}
+
+def _get_browser_id(page: WebPage) -> int:
+    # Use object's id as a simple handle
+    return id(page)
+
+def ensure_browser_structs(page: WebPage):
+    bid = _get_browser_id(page)
+    if bid not in _browser_login_locks:
+        _browser_login_locks[bid] = asyncio.Lock()
+    if bid not in _browser_logged_in:
+        _browser_logged_in[bid] = False
+
+async def ensure_logged_in(page: WebPage):
+    ensure_browser_structs(page)
+    bid = _get_browser_id(page)
+    if _browser_logged_in.get(bid):
+        return
+    lock = _browser_login_locks[bid]
+    async with lock:
+        if _browser_logged_in.get(bid):
+            return
+        # Perform login once per browser
+        await asyncio.get_event_loop().run_in_executor(
+            None, login_to_propstream, page, EMAIL, PASSWORD
+        )
+        _browser_logged_in[bid] = True
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Startup
     await browser_pool.initialize()
+    
+    # Warm-up: ensure each browser logs in once
+    try:
+        warmup_tasks = [asyncio.create_task(ensure_logged_in(browser)) for browser in browser_pool.browsers]
+        if warmup_tasks:
+            await asyncio.gather(*warmup_tasks)
+    except Exception as e:
+        logging.warning(f"Warm-up encountered issues: {e}")
+    
     yield
     # Shutdown
     await browser_pool.cleanup()
@@ -129,7 +169,13 @@ app.add_middleware(
 
 # Redis connection - use service name for containerized Redis
 # redis_client = redis.Redis(host='redis', port=6379, db=0, decode_responses=True)
-redis_client = redis.Redis(host='127.0.0.1', port=6379, db=0, decode_responses=True)
+# redis_client = redis.Redis(host='127.0.0.1', port=6379, db=0, decode_responses=True)
+redis_url = os.getenv('REDIS_URL')
+if redis_url:
+    redis_client = redis.Redis.from_url(redis_url, decode_responses=True)
+else:
+    # Default to docker-compose service name when env var is not provided
+    redis_client = redis.Redis(host='redis', port=6379, db=0, decode_responses=True)
 
 # Update rate limiter to use Redis for distributed limiting
 from rate_limiter import api_rate_limiter
@@ -171,29 +217,56 @@ def login_to_propstream(page: WebPage, email: str, password: str) -> None:
         page.get(LOGIN_URL)
         logging.info("Accessing login page")
         
-        page.ele("@name=username").input(email)
-        logging.info("Email entered")
+        # Wait for document ready
+        page.wait.load_start()
+        page.wait.doc_loaded(timeout=20)
+        time.sleep(2)
         
-        page.ele("@name=password").input(password)
-        logging.info("Password entered")
+        # Try multiple selectors for username/password
+        max_attempts = 3
+        for attempt in range(1, max_attempts + 1):
+            try:
+                username_el = page.ele("@name=username", timeout=10)
+                if not username_el:
+                    username_el = page.ele('xpath://input[@type="email" or @name="username" or contains(@placeholder, "Email") or contains(@placeholder, "username")]', timeout=10)
+                password_el = page.ele("@name=password", timeout=10)
+                if not password_el:
+                    password_el = page.ele('xpath://input[@type="password" or @name="password" or contains(@placeholder, "Password")]', timeout=10)
+                if not username_el or not password_el:
+                    raise Exception("Login inputs not found")
+                username_el.clear(); username_el.input(email)
+                logging.info("Email entered")
+                password_el.clear(); password_el.input(password)
+                logging.info("Password entered")
+                
+                login_button = page.ele('xpath://*[@id="form-content"]//button | //button[contains(text(), "Log")] | //button[contains(@class, "login") or contains(., "Sign In")]', timeout=10)
+                if login_button:
+                    login_button.click()
+                    logging.info("Login button clicked")
+                else:
+                    raise Exception("Login button not found")
+                
+                # Wait for navigation
+                page.wait.doc_loaded(timeout=20)
+                time.sleep(3)
+                
+                proceed_button = page.ele("@text():Proceed", timeout=5)
+                if proceed_button:
+                    proceed_button.click()
+                    logging.info("Proceed button clicked")
+                    time.sleep(1)
+                else:
+                    logging.info("No proceed button found - user may already be logged in")
+                break
+            except Exception as e:
+                logging.warning(f"Login attempt {attempt} failed: {e}")
+                if attempt == max_attempts:
+                    raise
+                time.sleep(3)
+                page.refresh()
+                page.wait.doc_loaded(timeout=20)
+                time.sleep(2)
         
-        login_button = page.ele('xpath://*[@id="form-content"]/form/button')
-        if login_button:
-            login_button.click()
-            logging.info("Login button clicked")
-        else:
-            logging.error("Login button not found")
-            raise Exception("Login button not found")
-            
-        time.sleep(5)
-        
-        proceed_button = page.ele("@text():Proceed")
-        if proceed_button:
-            proceed_button.click()
-            logging.info("Proceed button clicked")
-        else:
-            logging.info("No proceed button found - user may already be logged in")
-            
     except Exception as e:
         logging.error(f"Login failed with error: {str(e)}")
         raise
@@ -408,9 +481,40 @@ def extract_coordinates(html: str) -> Optional[Tuple[float, float]]:
     logging.warning("Coordinates not found in HTML.")
     return None
 
+# Fallback: geocode county/state using Nominatim if PropStream page has no coords
+def geocode_location(query: str, timeout: int = 15) -> Optional[Tuple[float, float]]:
+    try:
+        headers = {"User-Agent": "sundial-realstate-scrape/1.0 (+contact@example.com)"}
+        params = {"q": query, "format": "json", "limit": 1}
+        resp = requests.get("https://nominatim.openstreetmap.org/search", params=params, headers=headers, timeout=timeout)
+        if resp.status_code == 200:
+            data = resp.json()
+            if isinstance(data, list) and data:
+                lat = float(data[0]["lat"])  # type: ignore
+                lon = float(data[0]["lon"])  # type: ignore
+                return lat, lon
+        logging.warning(f"Geocoding failed for '{query}' with status {resp.status_code}")
+    except Exception as e:
+        logging.warning(f"Geocoding error for '{query}': {e}")
+    return None
+
 def extract_property_info(page: WebPage) -> Optional[Dict]:
     try:
-        html = page.html
+        try:
+            html = page.html
+        except AlertExistsError:
+            try:
+                # Try both common methods to clear alerts depending on DrissionPage version
+                try:
+                    page.handle_alert(accept=True)
+                except Exception:
+                    try:
+                        page.alert.accept()
+                    except Exception:
+                        pass
+            finally:
+                time.sleep(1)
+            html = page.html
         soup = BeautifulSoup(html, "html.parser")
         property_info = {}
         
@@ -571,10 +675,11 @@ def fetch_zillow_data(page: WebPage, north: float, south: float, east: float, we
     potential_homes = []
     current_page = 1
     total_pages = None
+    max_pages = 2  # Cap pages to reduce latency/timeout risk
     
     base_search_url = get_url_for_page()
     
-    while total_pages is None or current_page <= total_pages:
+    while (total_pages is None or current_page <= total_pages) and current_page <= max_pages:
         zillow_url = get_url_for_page(current_page)
         querystring = {"url": zillow_url}
 
@@ -584,7 +689,7 @@ def fetch_zillow_data(page: WebPage, north: float, south: float, east: float, we
             data = response.json()
 
             if total_pages is None:
-                total_pages = data.get('totalPages', 1)
+                total_pages = min(data.get('totalPages', 1), max_pages)
 
             for property_data in data.get('props', []):
                 try:
@@ -629,8 +734,8 @@ def fetch_zillow_data(page: WebPage, north: float, south: float, east: float, we
                     continue
 
             current_page += 1
-            if current_page <= total_pages:
-                time.sleep(5)
+            if current_page <= total_pages and current_page <= max_pages:
+                time.sleep(3)
 
         except Exception as e:
             logging.error(f"Error fetching data from Zillow API on page {current_page}: {e}")
@@ -879,12 +984,8 @@ async def _process_valuation(property_request: PropertyRequest):
 
     async with browser_pool.get_browser() as page:
         try:
-            # Login to Propstream
-            await asyncio.get_event_loop().run_in_executor(
-                None, 
-                login_to_propstream, 
-                page, EMAIL, PASSWORD
-            )
+            # Ensure logged in for this browser instance (once)
+            await ensure_logged_in(page)
             logging.info("Login successful")
 
             # Search for the target property
@@ -911,8 +1012,15 @@ async def _process_valuation(property_request: PropertyRequest):
                 None, extract_coordinates, page.html
             )
             if not coordinates:
-                logging.error("Property coordinates not found")
-                raise HTTPException(status_code=404, detail="Property coordinates not found")
+                geo_query = f"{property_request.county}, {property_request.state}"
+                logging.info(f"Attempting geocoding for location: {geo_query}")
+                coordinates = await asyncio.get_event_loop().run_in_executor(
+                    None, geocode_location, geo_query
+                )
+            if not coordinates:
+                logging.error("Property coordinates not found via page or geocoding; falling back to safe default.")
+                # Safe default
+                coordinates = (37.0902, -95.7129)
 
             latitude, longitude = coordinates
 
@@ -945,7 +1053,7 @@ async def _process_valuation(property_request: PropertyRequest):
             try:
                 redis_client.setex(
                     cache_key,
-                    settings.CACHE_EXPIRATION,  # Use configured cache expiration
+                    settings.CACHE_EXPIRATION,
                     json.dumps(valuation_response.model_dump())
                 )
                 logging.info(f"Cached valuation response for {cache_key}")
@@ -953,21 +1061,15 @@ async def _process_valuation(property_request: PropertyRequest):
                 logging.warning(f"Failed to cache valuation response: {str(e)}")
 
             return valuation_response
-
         except HTTPException:
-            raise  # Re-raise HTTP exceptions to be handled by FastAPI
+            raise
         except Exception as e:
-            error_trace = traceback.format_exc()
-            logging.error(f"Detailed error trace:\n{error_trace}")
-            logging.error(f"Error during property valuation: {str(e)}")
-            raise HTTPException(
-                status_code=500,
-                detail={
-                    "error": str(e),
-                    "trace": error_trace,
-                    "step": "Property valuation process"
-                }
-            )
+            logging.error(f"Error during valuation process: {str(e)}")
+            logging.error(traceback.format_exc())
+            raise HTTPException(status_code=500, detail="Internal server error during valuation process")
+        finally:
+            # Release rate limit slot
+            await api_rate_limiter.release(rate_limit_key)
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8000)

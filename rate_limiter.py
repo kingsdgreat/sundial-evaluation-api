@@ -57,5 +57,9 @@ class RateLimiter:
         self.local_calls[key].append(now)
         return True
 
+    async def release(self, key: str = "default") -> None:
+        """No-op release for interface compatibility."""
+        return None
+
 # Global rate limiter - will be initialized with Redis client in main.py
 api_rate_limiter = RateLimiter(calls_per_minute=30)

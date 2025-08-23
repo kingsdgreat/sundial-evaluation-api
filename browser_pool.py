@@ -6,7 +6,7 @@ import logging
 import os
 
 class BrowserPool:
-    def __init__(self, pool_size: int = 2):  # Reduced from 3 to 2 per instance
+    def __init__(self, pool_size: int = 3):  # Increased to 3 per instance
         self.pool_size = pool_size
         self.browsers: List[WebPage] = []
         self.available_browsers: asyncio.Queue = asyncio.Queue()
@@ -33,7 +33,7 @@ class BrowserPool:
         co.set_argument('--disable-extensions')
         co.set_argument('--disable-plugins')
         co.set_argument('--disable-images')  # Faster loading
-        co.set_argument('--disable-javascript')  # If not needed
+        # Removed: co.set_argument('--disable-javascript')  # JS required for PropStream
         co.set_argument('--remote-debugging-port=0')  # Auto-assign port
         
         # Memory optimization
@@ -61,4 +61,4 @@ class BrowserPool:
                 logging.warning(f"Error closing browser: {e}")
 
 # Global browser pool - smaller per instance since we have multiple instances
-browser_pool = BrowserPool(pool_size=2)
+browser_pool = BrowserPool(pool_size=3)
