@@ -44,12 +44,20 @@ class BrowserPool:
     
     @asynccontextmanager
     async def get_browser(self):
-        """Get browser from pool"""
-        browser = await self.available_browsers.get()
+        """Get fresh browser instance for each request to prevent session issues"""
+        # Create a fresh browser instance instead of reusing from pool
+        browser = self._create_browser()
+        logging.info("🆕 Created fresh browser instance for request")
         try:
             yield browser
         finally:
-            await self.available_browsers.put(browser)
+            # Clean up the browser after use
+            try:
+                browser.close()
+                browser.quit()
+                logging.info("🧹 Cleaned up browser instance after request")
+            except Exception as e:
+                logging.warning(f"Error cleaning up browser: {e}")
     
     async def cleanup(self):
         """Cleanup all browsers"""

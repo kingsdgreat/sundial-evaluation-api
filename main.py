@@ -212,6 +212,16 @@ def get_state_abbreviation(state: str) -> str:
     logging.info(f"State conversion: Input '{state}' -> Converted to '{abbr}'")
     return abbr
 
+def take_screenshot(page: WebPage, filename: str, description: str = "") -> None:
+    """Take a screenshot for debugging purposes"""
+    try:
+        # Save to current directory so it's accessible outside Docker
+        screenshot_path = f"./{filename}"
+        page.get_screenshot(path=screenshot_path)
+        logging.info(f"📸 Screenshot saved: {screenshot_path} - {description}")
+    except Exception as e:
+        logging.warning(f"Could not take screenshot {filename}: {e}")
+
 def login_to_propstream(page: WebPage, email: str, password: str) -> None:
     try:
         page.get(LOGIN_URL)
@@ -221,6 +231,67 @@ def login_to_propstream(page: WebPage, email: str, password: str) -> None:
         page.wait.load_start()
         page.wait.doc_loaded(timeout=20)
         time.sleep(2)
+        
+        # Take screenshot of login page
+        take_screenshot(page, "01_login_page.png", "Login page loaded")
+        
+        # Handle cookie popup first (this was blocking the login!)
+        logging.info("=== HANDLING COOKIE POPUP ===")
+        try:
+            # Look for cookie popup and accept/reject it
+            cookie_selectors = [
+                'xpath://button[contains(text(), "Accept All")]',
+                'xpath://button[contains(text(), "Reject All")]',
+                'xpath://button[contains(@class, "cookie") and contains(text(), "Accept")]',
+                'xpath://*[contains(@class, "cookie")]//button[contains(text(), "Accept")]',
+                'xpath://button[text()="Accept All"]',
+                'xpath://button[text()="Reject All"]'
+            ]
+            
+            cookie_handled = False
+            for selector in cookie_selectors:
+                try:
+                    cookie_button = page.ele(selector, timeout=3)
+                    if cookie_button:
+                        cookie_button.click()
+                        logging.info(f"✓ Cookie popup handled with selector: {selector}")
+                        time.sleep(2)
+                        take_screenshot(page, "01b_after_cookie_popup.png", "After handling cookie popup")
+                        cookie_handled = True
+                        break
+                except Exception:
+                    continue
+            
+            if not cookie_handled:
+                logging.info("No cookie popup found or already handled")
+        except Exception as e:
+            logging.warning(f"Error handling cookie popup: {e}")
+        
+        # Analyze the login page structure
+        logging.info("=== LOGIN PAGE ANALYSIS ===")
+        
+        # Check what input fields are available
+        all_inputs = page.eles('xpath://input')
+        logging.info(f"Found {len(all_inputs)} input fields on login page")
+        for i, inp in enumerate(all_inputs[:10]):
+            try:
+                inp_type = inp.attr('type') or 'text'
+                inp_name = inp.attr('name') or 'unknown'
+                inp_placeholder = inp.attr('placeholder') or 'none'
+                logging.info(f"Input {i+1}: type='{inp_type}', name='{inp_name}', placeholder='{inp_placeholder}'")
+            except Exception:
+                pass
+        
+        # Check what buttons are available
+        all_buttons = page.eles('xpath://button')
+        logging.info(f"Found {len(all_buttons)} buttons on login page")
+        for i, btn in enumerate(all_buttons[:5]):
+            try:
+                btn_text = btn.text.strip()
+                btn_type = btn.attr('type') or 'button'
+                logging.info(f"Button {i+1}: text='{btn_text}', type='{btn_type}'")
+            except Exception:
+                pass
         
         # Try multiple selectors for username/password
         max_attempts = 3
@@ -234,10 +305,67 @@ def login_to_propstream(page: WebPage, email: str, password: str) -> None:
                     password_el = page.ele('xpath://input[@type="password" or @name="password" or contains(@placeholder, "Password")]', timeout=10)
                 if not username_el or not password_el:
                     raise Exception("Login inputs not found")
-                username_el.clear(); username_el.input(email)
+                
+                # Clear and enter credentials with verification
+                # Clear email field more aggressively to prevent duplication
+                try:
+                    # Method 1: Click and select all content, then clear
+                    username_el.click()
+                    time.sleep(0.3)
+                    username_el.input('\x01')  # Ctrl+A to select all
+                    time.sleep(0.3)
+                    username_el.input('\x7f')  # Delete key
+                    time.sleep(0.3)
+                    
+                    # Method 2: Standard clear
+                    username_el.clear()
+                    time.sleep(0.5)
+                    
+                    # Method 3: Verify it's empty and clear again if needed
+                    current_value = username_el.value
+                    if current_value:
+                        logging.warning(f"Field not empty after clear: '{current_value}', trying again...")
+                        username_el.clear()
+                        time.sleep(0.5)
+                        # Force clear by setting empty value
+                        username_el.input('')
+                        username_el.clear()
+                        time.sleep(0.5)
+                        
+                except Exception as e:
+                    logging.warning(f"Error clearing email field: {e}")
+                
+                username_el.input(email)
+                time.sleep(0.5)
                 logging.info("Email entered")
-                password_el.clear(); password_el.input(password)
+                
+                # Verify email was entered correctly
+                entered_email = username_el.value
+                if entered_email != email:
+                    logging.warning(f"Email verification failed: entered '{entered_email}' vs expected '{email}'")
+                    # Try aggressive clearing and re-entering
+                    try:
+                        username_el.click()
+                        time.sleep(0.3)
+                        username_el.input('\x01')  # Ctrl+A to select all
+                        time.sleep(0.3)
+                        username_el.input('\x7f')  # Delete key
+                        time.sleep(0.3)
+                        username_el.clear()
+                        time.sleep(0.5)
+                        username_el.input(email)
+                        time.sleep(0.5)
+                        logging.info("🔄 Retried email entry after verification failure")
+                    except Exception as e:
+                        logging.warning(f"Could not retry email entry: {e}")
+                
+                password_el.clear()
+                time.sleep(1)
+                password_el.input(password)
                 logging.info("Password entered")
+                
+                # Wait a moment before clicking login
+                time.sleep(2)
                 
                 login_button = page.ele('xpath://*[@id="form-content"]//button | //button[contains(text(), "Log")] | //button[contains(@class, "login") or contains(., "Sign In")]', timeout=10)
                 if login_button:
@@ -250,13 +378,133 @@ def login_to_propstream(page: WebPage, email: str, password: str) -> None:
                 page.wait.doc_loaded(timeout=20)
                 time.sleep(3)
                 
-                proceed_button = page.ele("@text():Proceed", timeout=5)
+                # Handle any browser dialogs/alerts that might be blocking
+                logging.info("=== HANDLING BROWSER DIALOGS ===")
+                dialog_handled = False
+                
+                # Try multiple methods to handle dialogs/alerts
+                try:
+                    # Method 1: DrissionPage alert handling
+                    page.handle_alert(accept=True, timeout=3)
+                    logging.info("✅ Handled browser alert with handle_alert")
+                    dialog_handled = True
+                    time.sleep(3)
+                except Exception as e:
+                    logging.info(f"handle_alert method failed: {e}")
+                
+                if not dialog_handled:
+                    try:
+                        # Method 2: Direct alert property access
+                        if hasattr(page, 'alert'):
+                            page.alert.accept()
+                            logging.info("✅ Handled alert with direct alert.accept")
+                            dialog_handled = True
+                            time.sleep(3)
+                    except Exception as e:
+                        logging.info(f"Direct alert.accept failed: {e}")
+                
+                if not dialog_handled:
+                    try:
+                        # Method 3: Try to dismiss any blocking dialogs
+                        page.handle_alert(accept=False, timeout=2)
+                        logging.info("✅ Dismissed blocking dialog")
+                        time.sleep(2)
+                    except Exception as e:
+                        logging.info(f"Dialog dismiss failed: {e}")
+                
+                if not dialog_handled:
+                    logging.info("No browser dialogs found or all methods failed")
+                
+                # Take screenshot after login
+                take_screenshot(page, "02_after_login.png", "After login button clicked")
+                
+                # Look for proceed button with multiple selectors targeting the exact structure
+                proceed_selectors = [
+                    # Target the exact structure from user's HTML - most specific first
+                    'xpath://button[contains(@class, "src-components-Button-style__cuWaY__button") and contains(@class, "src-components-Button-style__FdLlt__solid")]',
+                    'xpath://button[contains(@class, "src-components-Button-style__FdLlt__solid")]//div[contains(@class, "src-components-Button-style__FABy8__content") and text()="Proceed"]/..',
+                    'xpath://button[contains(@class, "src-components-Button-style__cuWaY__button")]//div[text()="Proceed"]/..',
+                    'xpath://div[contains(@class, "src-app-components-SessionOverlay-style")]//button[contains(@class, "solid")]',
+                    'xpath://div[contains(@class, "SessionOverlay")]//button[.//div[text()="Proceed"]]',
+                    # More direct approach - look for button with Proceed text anywhere
+                    'xpath://button[contains(., "Proceed")]',
+                    'xpath://button[.//div[text()="Proceed"]]',
+                    'xpath://*[contains(@class, "FABy8__content") and text()="Proceed"]/..',
+                    "@text():Proceed",
+                    'xpath://button[text()="Proceed"]',
+                    'xpath://button[contains(text(), "Proceed")]',
+                    'xpath://*[text()="Proceed"]',
+                    'xpath://*[contains(text(), "Proceed")]'
+                ]
+                
+                # First, let's debug what buttons are available
+                logging.info("=== DEBUGGING PROCEED BUTTON SEARCH ===")
+                all_buttons_after_login = page.eles('xpath://button')
+                logging.info(f"Found {len(all_buttons_after_login)} buttons after login")
+                
+                for i, btn in enumerate(all_buttons_after_login[:10]):
+                    try:
+                        btn_text = btn.text.strip()
+                        btn_class = btn.attr('class') or 'no-class'
+                        btn_html = btn.html[:200] if hasattr(btn, 'html') else 'no-html'
+                        logging.info(f"Button {i+1}: text='{btn_text}', class='{btn_class[:100]}', html='{btn_html}'")
+                    except Exception:
+                        pass
+                
+                proceed_button = None
+                for i, selector in enumerate(proceed_selectors):
+                    try:
+                        logging.info(f"🔍 Trying Proceed selector {i+1}: {selector}")
+                        proceed_button = page.ele(selector, timeout=3)
+                        if proceed_button:
+                            logging.info(f"✅ Found Proceed button with selector {i+1}: {selector}")
+                            break
+                    except Exception as e:
+                        logging.info(f"❌ Proceed selector {i+1} failed: {e}")
+                        continue
+                
                 if proceed_button:
                     proceed_button.click()
                     logging.info("Proceed button clicked")
-                    time.sleep(1)
+                    time.sleep(3)  # Wait longer after proceed
+                    take_screenshot(page, "03_after_proceed.png", "After proceed button clicked")
                 else:
-                    logging.info("No proceed button found - user may already be logged in")
+                    logging.warning("⚠️  No proceed button found - checking if already past login...")
+                
+                # Verify we're successfully logged in by checking the current URL
+                final_url = page.url
+                logging.info(f"Final URL after login process: {final_url}")
+                
+                if "login.propstream.com" in final_url:
+                    logging.error("🚨 LOGIN FAILED - Still on login page after login process")
+                    take_screenshot(page, f"03b_still_on_login_attempt_{attempt}.png", f"Still on login page (attempt {attempt})")
+                    
+                    # Check for error messages on the login page
+                    error_messages = page.eles('xpath://*[contains(@class, "error") or contains(@class, "alert") or contains(text(), "Invalid") or contains(text(), "incorrect")]')
+                    if error_messages:
+                        for i, error in enumerate(error_messages[:3]):
+                            try:
+                                error_text = error.text.strip()
+                                if error_text:
+                                    logging.error(f"Login error message {i+1}: {error_text}")
+                            except Exception:
+                                pass
+                    
+                    # Check if we need to solve CAPTCHA or other verification
+                    captcha = page.ele('xpath://*[contains(@class, "captcha") or contains(@class, "recaptcha")]', timeout=2)
+                    if captcha:
+                        logging.error("CAPTCHA detected - manual intervention may be required")
+                    
+                    # This might be a credentials issue
+                    if attempt == max_attempts - 1:
+                        logging.error("Login failed on final attempt - check credentials or account status")
+                        raise Exception("Login failed - check credentials")
+                else:
+                    logging.info("✓ Successfully logged in and navigated away from login page")
+                    
+                    # Take screenshot of successful login destination
+                    take_screenshot(page, f"03c_successful_login_attempt_{attempt}.png", f"Successful login destination (attempt {attempt})")
+                    
                 break
             except Exception as e:
                 logging.warning(f"Login attempt {attempt} failed: {e}")
@@ -307,6 +555,51 @@ def search_property(page: WebPage, address_format: str, apn: str, county: str, s
             page.wait.doc_loaded(timeout=20)
             time.sleep(5)  # Wait for dynamic content
             
+            # Check if we got redirected back to login immediately
+            current_url_before_search = page.url
+            logging.info(f"URL after navigating to search page: {current_url_before_search}")
+            
+            if "login.propstream.com" in current_url_before_search:
+                logging.error("⚠️  Redirected to login page when trying to access search - session expired!")
+                take_screenshot(page, f"04_redirected_to_login_attempt_{attempt+1}.png", f"Redirected to login (attempt {attempt+1})")
+                
+                # Re-login and try again
+                logging.info("🔄 Session expired - attempting to re-login...")
+                try:
+                    login_to_propstream(page, EMAIL, PASSWORD)
+                    
+                    # Update the browser login status
+                    bid = _get_browser_id(page)
+                    _browser_logged_in[bid] = True
+                    
+                    logging.info("✅ Re-login successful, continuing with search...")
+                    
+                    # Try to navigate to search page again
+                    page.get("https://app.propstream.com/search")
+                    page.wait.load_start()
+                    page.wait.doc_loaded(timeout=20)
+                    time.sleep(5)
+                    
+                    current_url_after_relogin = page.url
+                    logging.info(f"URL after re-login and navigation: {current_url_after_relogin}")
+                    
+                    if "login.propstream.com" in current_url_after_relogin:
+                        logging.error("🚨 Still redirected to login after re-login attempt")
+                        # Mark as not logged in
+                        _browser_logged_in[bid] = False
+                        raise Exception("Re-login failed - still redirected to login page")
+                    
+                except Exception as e:
+                    logging.error(f"Re-login failed: {e}")
+                    # Mark as not logged in on failure
+                    bid = _get_browser_id(page)
+                    _browser_logged_in[bid] = False
+                    raise Exception("Session expired and re-login failed")
+            
+            # Take screenshot of search page
+            take_screenshot(page, f"04_search_page_attempt_{attempt+1}.png", f"Search page loaded (attempt {attempt+1})")
+            logging.info(f"Successfully on search page: {current_url_before_search}")
+            
             # Log page state
             logging.debug(f"Page title: {page.title}")
             logging.debug(f"Page URL: {page.url}")
@@ -325,90 +618,259 @@ def search_property(page: WebPage, address_format: str, apn: str, county: str, s
             search_input.input(address)
             logging.info("Address entered in search")
             
-            # Press Enter to perform the search (this is more reliable than finding a button)
-            logging.info("Pressing Enter to perform search...")
-            search_input.input('\n')  # Simulate Enter key
+            # Wait for dropdown suggestions to appear
+            time.sleep(3)
             
-            # Wait for search results to load
+            # Look for dropdown suggestion that matches our APN
+            logging.info("🔍 Looking for dropdown suggestion...")
+            dropdown_suggestions = page.eles('xpath://*[contains(@class, "dropdown") or contains(@class, "suggestion") or contains(@class, "autocomplete")]//div | //*[contains(text(), "APN")]')
+            
+            suggestion_clicked = False
+            if dropdown_suggestions:
+                logging.info(f"Found {len(dropdown_suggestions)} dropdown suggestions")
+                
+                for i, suggestion in enumerate(dropdown_suggestions[:5]):
+                    try:
+                        suggestion_text = suggestion.text.strip()
+                        logging.info(f"📋 Suggestion {i+1}: '{suggestion_text}'")
+                        
+                        # Check if this suggestion contains our APN
+                        if apn in suggestion_text or "APN" in suggestion_text:
+                            logging.info(f"🎯 Clicking on matching suggestion: {suggestion_text}")
+                            suggestion.click()
+                            suggestion_clicked = True
+                            time.sleep(2)
+                            break
+                    except Exception as e:
+                        logging.warning(f"Could not click suggestion {i+1}: {e}")
+            
+            # Always perform the search after dropdown selection or manual entry
+            if not suggestion_clicked:
+                logging.info("No matching dropdown suggestion found, pressing Enter to perform search...")
+                search_input.input('\n')  # Simulate Enter key
+            else:
+                logging.info("✅ Clicked on dropdown suggestion")
+            
+            # Additional step: Look for and click the Search button to ensure search is executed
+            logging.info("🔍 Looking for Search button to execute the search...")
+            search_button_selectors = [
+                # Based on the actual HTML structure: <span class="src-app-Search-Header-style__GatsT__searchText">Search</span>
+                'xpath://span[contains(@class, "src-app-Search-Header-style__GatsT__searchText") and text()="Search"]/..',
+                'xpath://span[contains(@class, "GatsT__searchText") and text()="Search"]/..',
+                'xpath://span[text()="Search"]/..',
+                'xpath://*[contains(@class, "searchText") and text()="Search"]/..',
+                # Fallback selectors
+                'xpath://button[contains(text(), "Search")]',
+                'xpath://button[@type="submit"]',
+                'xpath://*[contains(@class, "search")]//button',
+                'xpath://button[contains(@class, "search")]',
+                'xpath://input[@type="submit"]'
+            ]
+            
+            search_button_clicked = False
+            for i, selector in enumerate(search_button_selectors):
+                try:
+                    logging.info(f"🔍 Trying Search button selector {i+1}: {selector}")
+                    search_button = page.ele(selector, timeout=3)
+                    if search_button:
+                        logging.info(f"✅ Found Search button with selector {i+1}: {selector}")
+                        search_button.click()
+                        logging.info("🎯 Search button clicked!")
+                        search_button_clicked = True
+                        time.sleep(3)  # Wait after clicking search
+                        break
+                except Exception as e:
+                    logging.info(f"❌ Search button selector {i+1} failed: {e}")
+                    continue
+            
+            if not search_button_clicked:
+                logging.info("No explicit Search button found - relying on dropdown selection or Enter key")
+            
+            # Wait for search results to load and the page to update with results
             page.wait.doc_loaded(timeout=20)
-            time.sleep(10)  # Wait longer for search results to fully load
+            time.sleep(5)  # Initial wait for search results
             
-            # Based on the image, after search we should see the results page with property details
-            logging.info("Looking for search results...")
+            # Wait for the search page to be updated with search results
+            logging.info("=== WAITING FOR SEARCH PAGE TO UPDATE WITH RESULTS ===")
+            max_wait_attempts = 15  # Increased wait attempts
+            search_results_loaded = False
             
-            # Check if we're on the results page by looking for the property details panel
-            # The image shows property details in the right panel with "EST. VALUE" and other info
-            result_found = False
+            for wait_attempt in range(max_wait_attempts):
+                logging.info(f"Waiting for page to update with search results... attempt {wait_attempt + 1}/{max_wait_attempts}")
+                
+                # Check if the page has been updated with search results
+                # Look for the specific indicators that show search results are loaded
+                search_indicators = [
+                    'xpath://*[contains(text(), "Nearby")]',  # "Nearby" section header
+                    'xpath://table//td[contains(text(), "$")]',  # Price cells in results table
+                    'xpath://a[contains(@href, "/search/")]',  # Details anchors with /search/ href
+                    'xpath://*[contains(text(), "Estimated") and contains(text(), "Value")]',  # Estimated Value column
+                    'xpath://table//a[contains(., "Details")]',  # Details anchors in table
+                    f'xpath://*[contains(text(), "{apn}")]',  # Our specific APN in results
+                    'xpath://table//tr[position()>1]',  # Table rows with data
+                    'xpath://*[contains(text(), "Sale Amount")]',  # Sale Amount column header
+                    'xpath://*[contains(text(), "Sale Date")]',  # Sale Date column header
+                ]
+                
+                # Also try scrolling down to ensure search results are visible
+                if wait_attempt == 2:  # On 3rd attempt, try scrolling
+                    logging.info("📜 Scrolling down to check for search results...")
+                    try:
+                        page.scroll.to_bottom()
+                        time.sleep(2)
+                        page.scroll.to_top()
+                        time.sleep(2)
+                    except Exception as e:
+                        logging.warning(f"Could not scroll: {e}")
+                
+                for indicator in search_indicators:
+                    try:
+                        elements = page.eles(indicator, timeout=2)
+                        if elements:
+                            logging.info(f"✅ Found search results indicator: {indicator} ({len(elements)} elements)")
+                            search_results_loaded = True
+                            break
+                    except Exception:
+                        continue
+                
+                if search_results_loaded:
+                    logging.info("✅ Search results have been loaded on the page!")
+                    break
+                
+                logging.info(f"Page not yet updated with results, waiting 3 more seconds...")
+                time.sleep(3)
             
-            # Wait a bit more for the page to fully render
+            if not search_results_loaded:
+                logging.warning("⚠️ Search results may not have loaded properly after maximum wait time")
+            
+            # Wait a bit more to ensure all dynamic content is loaded
             time.sleep(5)
             
-            # Look for the property details panel (right side of the page)
-            # The image shows this contains property information like "EST. VALUE $409,000"
-            property_panel = page.ele('xpath://div[contains(@class, "property") or contains(@class, "details") or contains(@class, "panel")]', timeout=15)
-            if property_panel:
-                logging.info("Property details panel found")
-                result_found = True
+            # Take screenshot after search to see the results
+            take_screenshot(page, f"05_after_search_attempt_{attempt+1}.png", f"After search performed (attempt {attempt+1})")
+            logging.info(f"URL after search: {page.url}")
             
-            # If not found, try looking for the map markers (left side of the page)
-            if not result_found:
-                # Look for map markers or property listings
-                markers = page.eles('xpath://div[contains(@class, "marker") or contains(@class, "property-marker") or contains(@style, "position")]')
-                if markers:
-                    logging.info(f"Found {len(markers)} potential property markers on map")
-                    # Click on the first marker
-                    try:
-                        markers[0].click()
-                        logging.info("Clicked on property marker")
-                        result_found = True
-                        time.sleep(3)  # Wait for details to load
-                    except Exception as e:
-                        logging.warning(f"Could not click marker: {e}")
-            
-            # If still not found, try to find by text content in the page
-            if not result_found:
-                # Look for the APN number or address in the page content
-                result = page.ele(f'xpath://*[contains(text(), "{apn}") or contains(text(), "{county}") or contains(text(), "{state_abbr}")]', timeout=10)
-                if result:
-                    try:
-                        result.click()
-                        logging.info("Found and clicked on property result")
-                        result_found = True
-                        time.sleep(3)
-                    except Exception as e:
-                        logging.warning(f"Could not click result: {e}")
-            
-            # If we still haven't found results, check if the search actually worked
-            if not result_found:
-                # Check if we're still on the search page or if we got results
-                current_url = page.url
-                logging.info(f"Current URL after search: {current_url}")
+            # Debug: Log page content to understand structure
+            logging.info("=== DEBUGGING PAGE CONTENT ===")
+            try:
+                page_html = page.html
+                logging.info(f"Page HTML length: {len(page_html)} characters")
                 
-                # If we're still on the search page, the search might not have worked
-                if "search" in current_url.lower():
-                    logging.error("Still on search page - search may not have worked")
-                    raise Exception("Search did not produce results")
+                # Look for key indicators in the HTML
+                if "Details" in page_html:
+                    logging.info("✅ 'Details' text found in HTML")
+                    details_count = page_html.count("Details")
+                    logging.info(f"Found {details_count} occurrences of 'Details' in HTML")
                 else:
-                    logging.info("URL changed, assuming search worked")
-                    result_found = True
+                    logging.warning("❌ 'Details' text NOT found in HTML")
+                    
+                    # Debug: Check what content is actually on the page
+                    if "No results found" in page_html or "no results" in page_html.lower():
+                        logging.warning("🚫 No search results found for this property")
+                    elif "Nearby" in page_html:
+                        logging.info("✅ 'Nearby' section found - search results exist but no Details anchors")
+                        # Log some sample table content to understand the structure
+                        if "<table" in page_html:
+                            logging.info("📋 Table structure exists - checking table content...")
+                            # Extract a sample of the table content for debugging
+                            table_start = page_html.find("<table")
+                            if table_start > -1:
+                                table_sample = page_html[table_start:table_start+2000]
+                                logging.info(f"📋 Table sample (first 500 chars): {table_sample[:500]}...")
+                    else:
+                        logging.warning("❌ No 'Nearby' section found - search results may not have loaded")
+                
+                if apn in page_html:
+                    logging.info(f"✅ APN '{apn}' found in HTML")
+                else:
+                    logging.warning(f"❌ APN '{apn}' NOT found in HTML")
+                
+                # Look for table structure
+                if "<table" in page_html:
+                    logging.info("✅ Table structure found in HTML")
+                    table_count = page_html.count("<table")
+                    logging.info(f"Found {table_count} tables in HTML")
+                else:
+                    logging.warning("❌ No table structure found in HTML")
+                
+            except Exception as e:
+                logging.warning(f"Error analyzing page HTML: {e}")
             
-            # Now look for the "Details" button to get more detailed information
-            # Based on the image, there's a "Details" button in the top right of the property panel
-            logging.info("Looking for Details button...")
-            details_button = page.ele('xpath://button[contains(text(), "Details")]', timeout=15)
-            if details_button:
+            # NEW: Navigate to property details page by clicking the Details anchor
+            logging.info("=== NAVIGATING TO PROPERTY DETAILS PAGE ===")
+            
+            # Look for the Details anchor in the search results
+            # Based on the actual HTML structure: <a class="src-components-base-Button-style__MOJLh__border-blue src-app-Search-Property-style__fpSUR__textButton" href="/search/1848199534"><span class="src-components-base-Button-style__FBPrq__text">Details</span></a>
+            details_selectors = [
+                # Most specific selector matching the exact structure
+                'xpath://a[contains(@class, "src-app-Search-Property-style__fpSUR__textButton")]//span[text()="Details"]/..',
+                'xpath://a[contains(@class, "fpSUR__textButton")]//span[text()="Details"]/..',
+                'xpath://a[contains(@class, "textButton")]//span[text()="Details"]/..',
+                # Alternative selectors for the anchor itself
+                'xpath://a[contains(@class, "src-app-Search-Property-style__fpSUR__textButton")]',
+                'xpath://a[contains(@class, "fpSUR__textButton")]',
+                'xpath://a[contains(@href, "/search/") and contains(@class, "textButton")]',
+                # Fallback selectors
+                'xpath://a[.//span[text()="Details"]]',
+                'xpath://a[contains(text(), "Details")]',
+                'xpath://span[text()="Details"]/..',
+                'xpath://a[text()="Details"]',
+                'xpath://table//a[text()="Details"]',
+                'xpath://*[contains(@class, "table")]//a[contains(text(), "Details")]',
+                'xpath://tr//a[text()="Details"]'
+            ]
+            
+            details_anchor = None
+            for i, selector in enumerate(details_selectors):
                 try:
-                    details_button.click()
-                    logging.info("Details button clicked")
-                    page.wait.doc_loaded(timeout=20)
-                    time.sleep(5)  # Wait for details page to load
+                    logging.info(f"🔍 Trying Details selector {i+1}: {selector}")
+                    details_anchor = page.ele(selector, timeout=5)
+                    if details_anchor:
+                        logging.info(f"✅ Found Details anchor with selector {i+1}: {selector}")
+                        break
                 except Exception as e:
-                    logging.warning(f"Could not click Details button: {e}")
-            else:
-                logging.info("Details button not found - may already be on details page")
+                    logging.info(f"❌ Details selector {i+1} failed: {e}")
+                    continue
             
-            # Now we should be on the property detail page with all the information
-            logging.info("Property search and details navigation completed")
+            if not details_anchor:
+                # Debug: Log all anchors to understand the page structure
+                logging.info("🔍 Debugging: Listing all anchors on the page...")
+                all_anchors = page.eles('xpath://a')
+                logging.info(f"Found {len(all_anchors)} total anchors on the page")
+                
+                for i, anchor in enumerate(all_anchors[:10]):  # Log first 10 anchors
+                    try:
+                        anchor_text = anchor.text.strip()
+                        anchor_href = anchor.attr('href') or 'no-href'
+                        anchor_class = anchor.attr('class') or 'no-class'
+                        logging.info(f"Anchor {i+1}: text='{anchor_text}', href='{anchor_href}', class='{anchor_class[:100]}'")
+                        
+                        if "Details" in anchor_text:
+                            details_anchor = anchor
+                            logging.info(f"✅ Found Details anchor by text search: '{anchor_text}'")
+                            break
+                    except Exception as e:
+                        logging.warning(f"Error examining anchor {i+1}: {e}")
+                        continue
+            
+            if details_anchor:
+                logging.info("🎯 Clicking Details anchor to navigate to property details page...")
+                details_anchor.click()
+                
+                # Wait for the details page to load
+                page.wait.doc_loaded(timeout=20)
+                time.sleep(5)  # Wait for dynamic content to load
+                
+                # Take screenshot of details page
+                take_screenshot(page, f"06_property_details_page_attempt_{attempt+1}.png", f"Property details page (attempt {attempt+1})")
+                logging.info(f"✅ Successfully navigated to details page. URL: {page.url}")
+                
+            else:
+                logging.warning("⚠️ Details anchor not found - will try to extract from current search results page")
+                # Continue with current page extraction as fallback
+            
+            # Property search and navigation completed - ready for data extraction
+            logging.info("🎯 Property search and navigation completed - ready for data extraction")
             
             return
         
@@ -518,98 +980,221 @@ def extract_property_info(page: WebPage) -> Optional[Dict]:
         soup = BeautifulSoup(html, "html.parser")
         property_info = {}
         
-        logging.info("Extracting property information from PropStream page...")
+        logging.info("Extracting property information from PropStream details page...")
         
-        # Based on the second image, look for property details in the right panel
-        # The image shows "EST. VALUE $409,000" prominently displayed
+        # Take screenshot of the page we're extracting from
+        take_screenshot(page, "10_extraction_page.png", "Page during property info extraction")
         
-        # Method 1: Look for estimated value (most prominent in the image)
-        value_patterns = [
-            r"EST\.?\s*VALUE\s*\$?([\d,]+)",
-            r"Estimated\s+Value\s*\$?([\d,]+)",
-            r"\$([\d,]+)\s*EST\.?\s*VALUE",
-            r"Value:\s*\$?([\d,]+)"
-        ]
+        # Log current page state for debugging
+        logging.info(f"=== CURRENT PAGE STATE ===")
+        logging.info(f"Page URL: {page.url}")
+        logging.info(f"Page title: {page.title}")
         
-        for pattern in value_patterns:
-            value_match = re.search(pattern, html, re.IGNORECASE)
-            if value_match:
-                try:
-                    value_str = value_match.group(1).replace(",", "")
-                    property_info["estimated_value"] = float(value_str)
-                    logging.info(f"Found estimated value: ${property_info['estimated_value']:,.2f}")
-                    break
-                except ValueError:
-                    continue
+        # Check if we're on the right page for extraction
+        if "login.propstream.com" in page.url:
+            logging.error("🚨 CRITICAL: Trying to extract from LOGIN PAGE instead of property page!")
+            logging.error("This explains why no property data is found")
         
-        # Method 2: Look for lot size/acreage information
-        # The image shows "10,400 LOT" which suggests lot size
-        lot_patterns = [
-            r"(\d+(?:,\d+)?)\s*LOT",
-            r"Lot\s+Size[:\s]*([\d,]+)\s*(?:sq\s*ft|acres?)",
-            r"(\d+(?:\.\d+)?)\s*acres?",
-            r"(\d+(?:,\d+)?)\s*sq\s*ft"
-        ]
+        # NEW EXTRACTION LOGIC: Extract from property details page
+        logging.info("=== EXTRACTING FROM PROPERTY DETAILS PAGE ===")
         
-        for pattern in lot_patterns:
-            lot_match = re.search(pattern, html, re.IGNORECASE)
-            if lot_match:
-                try:
-                    lot_value = lot_match.group(1).replace(",", "")
-                    if "sq ft" in lot_match.group(0).lower():
-                        # Convert square feet to acres
-                        sqft = float(lot_value)
-                        property_info["acreage"] = sqft / 43560
-                        logging.info(f"Found lot size: {sqft:,.0f} sq ft ({property_info['acreage']:.2f} acres)")
-                    else:
-                        property_info["acreage"] = float(lot_value)
-                        logging.info(f"Found acreage: {property_info['acreage']:.2f} acres")
-                    break
-                except ValueError:
-                    continue
+        # Method 1: Extract Lot Size from the details page structure
+        # Based on your HTML: <div class="src-components-GroupInfo-style__FpyDf__label">Lot Size</div>
+        # followed by: <div class="src-components-GroupInfo-style__sbtoP__value"><div>12.29 acres</div><div>535,352 SqFt.</div></div>
         
-        # Method 3: Look for property details in structured elements
-        # Try to find elements with specific text patterns
-        for elem in soup.find_all(["div", "span", "p"]):
-            text = elem.get_text().strip()
+        lot_size_labels = soup.find_all("div", class_=lambda x: x and "GroupInfo-style__FpyDf__label" in x)
+        logging.info(f"Found {len(lot_size_labels)} GroupInfo label elements")
+        
+        for label_elem in lot_size_labels:
+            label_text = label_elem.get_text().strip()
+            logging.info(f"📋 Checking label: '{label_text}'")
             
-            # Look for lot size information
-            if "lot" in text.lower() and any(char.isdigit() for char in text):
-                lot_match = re.search(r"(\d+(?:,\d+)?)\s*(?:sq\s*ft|acres?)", text, re.IGNORECASE)
-                if lot_match and "acreage" not in property_info:
-                    try:
-                        lot_value = lot_match.group(1).replace(",", "")
-                        if "sq ft" in text.lower():
-                            sqft = float(lot_value)
-                            property_info["acreage"] = sqft / 43560
+            if label_text == "Lot Size":
+                logging.info("🎯 Found Lot Size label - looking for corresponding value...")
+                
+                # Find the corresponding value element (should be a sibling or in same container)
+                parent = label_elem.parent
+                if parent:
+                    # Look for the value div with the specific class
+                    value_elem = parent.find("div", class_=lambda x: x and "GroupInfo-style__sbtoP__value" in x)
+                    if value_elem:
+                        value_text = value_elem.get_text().strip()
+                        logging.info(f"🎯 Found Lot Size value container: '{value_text}'")
+                        
+                        # Extract acres value from the structure like "12.29 acres535,352 SqFt."
+                        acres_match = re.search(r"(\d+(?:\.\d+)?)\s*acres?", value_text, re.IGNORECASE)
+                        if acres_match:
+                            try:
+                                acres_value = float(acres_match.group(1))
+                                property_info["acreage"] = acres_value
+                                logging.info(f"🏡 Successfully extracted acreage from details page: {acres_value} acres")
+                                break
+                            except ValueError as e:
+                                logging.warning(f"Could not convert acres value: {e}")
                         else:
-                            property_info["acreage"] = float(lot_value)
-                        logging.info(f"Found lot size from text: {text}")
-                    except ValueError:
-                        continue
+                            logging.warning(f"No acres pattern found in value text: '{value_text}'")
+                    else:
+                        logging.warning("No value element found for Lot Size label")
+                else:
+                    logging.warning("No parent element found for Lot Size label")
+        
+        # Method 2: Extract Estimated Value from the details page
+        # Look for "Estimated Value" label and corresponding value
+        for label_elem in lot_size_labels:  # Reuse the same label elements
+            label_text = label_elem.get_text().strip()
             
-            # Look for value information
-            if "value" in text.lower() and "$" in text:
-                value_match = re.search(r"\$([\d,]+)", text)
-                if value_match and "estimated_value" not in property_info:
-                    try:
-                        value_str = value_match.group(1).replace(",", "")
-                        property_info["estimated_value"] = float(value_str)
-                        logging.info(f"Found value from text: {text}")
-                    except ValueError:
-                        continue
+            if "Estimated Value" in label_text or "Est. Value" in label_text:
+                logging.info(f"🎯 Found Estimated Value label: '{label_text}'")
+                
+                parent = label_elem.parent
+                if parent:
+                    value_elem = parent.find("div", class_=lambda x: x and "GroupInfo-style__sbtoP__value" in x)
+                    if value_elem:
+                        value_text = value_elem.get_text().strip()
+                        logging.info(f"💰 Found Estimated Value container: '{value_text}'")
+                        
+                        # Extract dollar amount
+                        value_match = re.search(r"\$?([\d,]+)", value_text)
+                        if value_match:
+                            try:
+                                value_str = value_match.group(1).replace(",", "")
+                                property_info["estimated_value"] = float(value_str)
+                                logging.info(f"💰 Successfully extracted estimated value: ${property_info['estimated_value']:,.2f}")
+                                break
+                            except ValueError as e:
+                                logging.warning(f"Could not convert estimated value: {e}")
         
-        # If we still don't have acreage, set a default
+        # Method 3: Fallback extraction using more generic patterns for details page
+        if "acreage" not in property_info or "estimated_value" not in property_info:
+            logging.info("=== FALLBACK: GENERIC PATTERN EXTRACTION FROM DETAILS PAGE ===")
+            
+            # Look for any text containing acres
+            if "acreage" not in property_info:
+                acre_patterns = [
+                    r"(\d+(?:\.\d+)?)\s*acres?",  # "12.29 acres"
+                    r"Lot\s*Size[:\s]*.*?(\d+(?:\.\d+)?)\s*acres?",  # "Lot Size: ... 12.29 acres"
+                ]
+                
+                for i, pattern in enumerate(acre_patterns):
+                    logging.info(f"🔍 Trying acres pattern {i+1}: {pattern}")
+                    acre_match = re.search(pattern, html, re.IGNORECASE | re.DOTALL)
+                    if acre_match:
+                        try:
+                            acres_value = float(acre_match.group(1))
+                            property_info["acreage"] = acres_value
+                            logging.info(f"🏡 Found acreage from fallback pattern {i+1}: {acres_value} acres")
+                            break
+                        except ValueError as e:
+                            logging.warning(f"Could not convert acres from pattern {i+1}: {e}")
+            
+            # Look for estimated value patterns
+            if "estimated_value" not in property_info:
+                value_patterns = [
+                    r"Estimated\s+Value[:\s]*\$?([\d,]+)",  # "Estimated Value: $409,000"
+                    r"Est\.?\s*Value[:\s]*\$?([\d,]+)",     # "Est. Value: $409,000"
+                    r"\$(\d{1,3}(?:,\d{3})*)\s*EST\.\s*VALUE",  # "$387,000 EST. VALUE" - based on your image
+                    r"<h3[^>]*>\$(\d{1,3}(?:,\d{3})*)</h3>",  # Large price display like "$387,000"
+                    r"Estimated\s+Value[^$]*\$(\d{1,3}(?:,\d{3})*)",  # "Estimated Value ... $387,000"
+                    r"\$?([\d,]+).*?(?:estimated|est\.?)\s*value",  # "$409,000 ... estimated value" (original pattern)
+                ]
+                
+                for i, pattern in enumerate(value_patterns):
+                    logging.info(f"🔍 Trying value pattern {i+1}: {pattern}")
+                    value_match = re.search(pattern, html, re.IGNORECASE | re.DOTALL)
+                    if value_match:
+                        try:
+                            value_str = value_match.group(1).replace(",", "")
+                            property_info["estimated_value"] = float(value_str)
+                            logging.info(f"💰 Found estimated value from fallback pattern {i+1}: ${property_info['estimated_value']:,.2f}")
+                            break
+                        except ValueError as e:
+                            logging.warning(f"Could not convert value from pattern {i+1}: {e}")
+        
+        # Method 4: Extract from any table structure on the details page
+        if "acreage" not in property_info or "estimated_value" not in property_info:
+            logging.info("=== METHOD 4: TABLE EXTRACTION FROM DETAILS PAGE ===")
+            
+            tables = soup.find_all("table")
+            logging.info(f"Found {len(tables)} tables on details page")
+            
+            for table_idx, table in enumerate(tables):
+                rows = table.find_all("tr")
+                
+                for row in rows:
+                    cells = row.find_all(["td", "th"])
+                    if len(cells) >= 2:
+                        label = cells[0].get_text().strip()
+                        value = cells[1].get_text().strip()
+                        
+                        # Look for lot size/acreage
+                        if "acreage" not in property_info and any(keyword in label.lower() for keyword in ["lot size", "lot area", "land area", "acreage"]):
+                            logging.info(f"🎯 Found lot size in table: '{label}' = '{value}'")
+                            
+                            acre_match = re.search(r"(\d+(?:\.\d+)?)\s*acres?", value, re.IGNORECASE)
+                            if acre_match:
+                                try:
+                                    acres_value = float(acre_match.group(1))
+                                    property_info["acreage"] = acres_value
+                                    logging.info(f"🏡 Extracted acreage from table: {acres_value} acres")
+                                except ValueError:
+                                    continue
+                        
+                        # Look for estimated value
+                        if "estimated_value" not in property_info and any(keyword in label.lower() for keyword in ["estimated value", "est. value", "estimated val"]):
+                            logging.info(f"🎯 Found estimated value in table: '{label}' = '{value}'")
+                            
+                            value_match = re.search(r"\$?([\d,]+)", value)
+                            if value_match:
+                                try:
+                                    value_str = value_match.group(1).replace(",", "")
+                                    property_info["estimated_value"] = float(value_str)
+                                    logging.info(f"💰 Extracted estimated value from table: ${property_info['estimated_value']:,.2f}")
+                                except ValueError:
+                                    continue
+        
+        # Method 5: Look for any div/span elements containing the target information
+        if "acreage" not in property_info or "estimated_value" not in property_info:
+            logging.info("=== METHOD 5: GENERAL ELEMENT SEARCH ON DETAILS PAGE ===")
+            
+            # Search all text elements for acres and value information
+            for elem in soup.find_all(["div", "span", "p", "td", "th"]):
+                text = elem.get_text().strip()
+                
+                # Look for acreage
+                if "acreage" not in property_info and "acre" in text.lower() and any(char.isdigit() for char in text):
+                    acre_match = re.search(r"(\d+(?:\.\d+)?)\s*acres?", text, re.IGNORECASE)
+                    if acre_match:
+                        try:
+                            acres_value = float(acre_match.group(1))
+                            property_info["acreage"] = acres_value
+                            logging.info(f"🏡 Found acreage from element text: '{text}' -> {acres_value} acres")
+                        except ValueError:
+                            continue
+                
+                # Look for estimated value
+                if "estimated_value" not in property_info and ("estimated" in text.lower() or "est." in text.lower()) and "$" in text:
+                    value_match = re.search(r"\$?([\d,]+)", text)
+                    if value_match:
+                        try:
+                            value_str = value_match.group(1).replace(",", "")
+                            estimated_val = float(value_str)
+                            # Only accept reasonable property values (> $10,000)
+                            if estimated_val > 10000:
+                                property_info["estimated_value"] = estimated_val
+                                logging.info(f"💰 Found estimated value from element text: '{text}' -> ${estimated_val:,.2f}")
+                        except ValueError:
+                            continue
+        
+        # Final validation and defaults
         if "acreage" not in property_info:
+            logging.warning("⚠️ No acreage found on details page - using default value of 1.0 acres")
             property_info["acreage"] = 1.0
-            logging.warning("No acreage found, using default value of 1.0 acres")
         
-        # If we still don't have estimated value, set to None
         if "estimated_value" not in property_info:
-            logging.warning("No estimated value found")
+            logging.warning("⚠️ No estimated value found on details page")
             property_info["estimated_value"] = None
         
-        logging.info(f"Extracted property info: {property_info}")
+        logging.info(f"✅ Final extracted property info: {property_info}")
         return property_info
         
     except Exception as e:
@@ -1004,6 +1589,9 @@ async def _process_valuation(property_request: PropertyRequest):
             if not target_property_info:
                 logging.error("Failed to extract target property info")
                 raise HTTPException(status_code=500, detail="Failed to extract target property information")
+
+            # Browser cleanup will be handled by the browser pool automatically
+            logging.info("✅ Property extraction completed - browser will be cleaned up automatically")
 
             target_acreage = target_property_info.get("acreage", 1.0)
 
