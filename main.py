@@ -27,6 +27,10 @@ from typing import Optional
 from pydantic_settings import BaseSettings
 from pydantic import Field
 
+# Global rate limiting to prevent PropStream blocking
+last_request_time = 0
+MIN_REQUEST_INTERVAL = 120  # 2 minutes between requests to avoid account lockout
+
 # Configure logging
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
@@ -105,48 +109,45 @@ from browser_pool import browser_pool
 # Add semaphore to limit concurrent requests
 REQUEST_SEMAPHORE = asyncio.Semaphore(3)  # Align with browser pool size
 
-# Per-browser login lock and flag map
-_browser_login_locks: Dict[int, asyncio.Lock] = {}
-_browser_logged_in: Dict[int, bool] = {}
-
-def _get_browser_id(page: WebPage) -> int:
-    # Use object's id as a simple handle
-    return id(page)
-
-def ensure_browser_structs(page: WebPage):
-    bid = _get_browser_id(page)
-    if bid not in _browser_login_locks:
-        _browser_login_locks[bid] = asyncio.Lock()
-    if bid not in _browser_logged_in:
-        _browser_logged_in[bid] = False
+# Removed old browser tracking - now using persistent session in browser_pool
 
 async def ensure_logged_in(page: WebPage):
-    ensure_browser_structs(page)
-    bid = _get_browser_id(page)
-    if _browser_logged_in.get(bid):
+    """Ensure the browser is logged in, using persistent session when possible"""
+    # Check if we're already on a logged-in page
+    current_url = page.url
+    if current_url and "app.propstream.com" in current_url:
+        logging.info("🔄 Already logged in - session is valid")
+        browser_pool.mark_session_valid()
         return
-    lock = _browser_login_locks[bid]
-    async with lock:
-        if _browser_logged_in.get(bid):
-            return
-        # Perform login once per browser
-        await asyncio.get_event_loop().run_in_executor(
-            None, login_to_propstream, page, EMAIL, PASSWORD
-        )
-        _browser_logged_in[bid] = True
+    
+    # Check if session is marked as valid
+    if browser_pool.session_valid:
+        # Try to navigate to search page to verify session
+        try:
+            page.get('https://app.propstream.com/search')
+            time.sleep(3)
+            if "app.propstream.com" in page.url:
+                logging.info("✅ Persistent session is still valid")
+                return
+            else:
+                logging.warning("❌ Persistent session expired, need to re-login")
+                browser_pool.invalidate_session()
+        except Exception as e:
+            logging.warning(f"Error checking persistent session: {e}")
+            browser_pool.invalidate_session()
+    
+    # Need to login
+    logging.info("🔑 Performing login...")
+    await asyncio.get_event_loop().run_in_executor(
+        None, login_to_propstream, page, EMAIL, PASSWORD
+    )
+    browser_pool.mark_session_valid()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Startup
     await browser_pool.initialize()
-    
-    # Warm-up: ensure each browser logs in once
-    try:
-        warmup_tasks = [asyncio.create_task(ensure_logged_in(browser)) for browser in browser_pool.browsers]
-        if warmup_tasks:
-            await asyncio.gather(*warmup_tasks)
-    except Exception as e:
-        logging.warning(f"Warm-up encountered issues: {e}")
+    logging.info("🚀 Browser pool initialized with persistent session support")
     
     yield
     # Shutdown
@@ -230,10 +231,10 @@ def login_to_propstream(page: WebPage, email: str, password: str) -> None:
         # Wait for document ready
         page.wait.load_start()
         page.wait.doc_loaded(timeout=20)
-        time.sleep(2)
+        time.sleep(5)  # Increased wait time to avoid rate limiting
         
         # Take screenshot of login page
-        take_screenshot(page, "01_login_page.png", "Login page loaded")
+        # take_screenshot(page, "01_login_page.png", "Login page loaded")
         
         # Handle cookie popup first (this was blocking the login!)
         logging.info("=== HANDLING COOKIE POPUP ===")
@@ -256,7 +257,7 @@ def login_to_propstream(page: WebPage, email: str, password: str) -> None:
                         cookie_button.click()
                         logging.info(f"✓ Cookie popup handled with selector: {selector}")
                         time.sleep(2)
-                        take_screenshot(page, "01b_after_cookie_popup.png", "After handling cookie popup")
+                        # take_screenshot(page, "01b_after_cookie_popup.png", "After handling cookie popup")
                         cookie_handled = True
                         break
                 except Exception:
@@ -307,65 +308,54 @@ def login_to_propstream(page: WebPage, email: str, password: str) -> None:
                     raise Exception("Login inputs not found")
                 
                 # Clear and enter credentials with verification
-                # Clear email field more aggressively to prevent duplication
+                # Use direct value setting to avoid input corruption
                 try:
-                    # Method 1: Click and select all content, then clear
-                    username_el.click()
-                    time.sleep(0.3)
-                    username_el.input('\x01')  # Ctrl+A to select all
-                    time.sleep(0.3)
-                    username_el.input('\x7f')  # Delete key
-                    time.sleep(0.3)
+                    # Method 1: Direct attribute setting (most reliable)
+                    username_el.set.value(email)
+                    # Human-like delay with randomization
+                    time.sleep(random.uniform(1.0, 2.5))
+                    logging.info("Email set via direct value attribute")
                     
-                    # Method 2: Standard clear
-                    username_el.clear()
-                    time.sleep(0.5)
-                    
-                    # Method 3: Verify it's empty and clear again if needed
-                    current_value = username_el.value
-                    if current_value:
-                        logging.warning(f"Field not empty after clear: '{current_value}', trying again...")
-                        username_el.clear()
-                        time.sleep(0.5)
-                        # Force clear by setting empty value
-                        username_el.input('')
-                        username_el.clear()
-                        time.sleep(0.5)
-                        
-                except Exception as e:
-                    logging.warning(f"Error clearing email field: {e}")
-                
-                username_el.input(email)
-                time.sleep(0.5)
-                logging.info("Email entered")
-                
-                # Verify email was entered correctly
-                entered_email = username_el.value
-                if entered_email != email:
-                    logging.warning(f"Email verification failed: entered '{entered_email}' vs expected '{email}'")
-                    # Try aggressive clearing and re-entering
-                    try:
-                        username_el.click()
-                        time.sleep(0.3)
-                        username_el.input('\x01')  # Ctrl+A to select all
-                        time.sleep(0.3)
-                        username_el.input('\x7f')  # Delete key
-                        time.sleep(0.3)
+                    # Verify it was set correctly
+                    entered_email = username_el.value
+                    if entered_email == email:
+                        logging.info("✅ Email verification successful")
+                    else:
+                        logging.warning(f"❌ Direct value setting failed: '{entered_email}' vs expected '{email}'")
+                        # Fallback: Clear and input method
                         username_el.clear()
                         time.sleep(0.5)
                         username_el.input(email)
                         time.sleep(0.5)
-                        logging.info("🔄 Retried email entry after verification failure")
-                    except Exception as e:
-                        logging.warning(f"Could not retry email entry: {e}")
+                        logging.info("🔄 Used fallback input method")
+                        
+                except Exception as e:
+                    logging.warning(f"Error setting email field: {e}")
+                    # Final fallback: standard input
+                    try:
+                        username_el.clear()
+                        time.sleep(0.5)
+                        username_el.input(email)
+                        time.sleep(0.5)
+                        logging.info("🔄 Used standard input as final fallback")
+                    except Exception as e2:
+                        logging.error(f"All email input methods failed: {e2}")
+                
+                # Final verification of email field
+                final_email = username_el.value
+                if final_email == email:
+                    logging.info(f"✅ Final email verification successful: '{final_email}'")
+                else:
+                    logging.error(f"❌ Final email verification failed: '{final_email}' vs expected '{email}'")
                 
                 password_el.clear()
-                time.sleep(1)
+                time.sleep(random.uniform(1.5, 3.0))  # Human-like delay
                 password_el.input(password)
+                time.sleep(random.uniform(0.5, 1.5))  # Small delay after password
                 logging.info("Password entered")
                 
                 # Wait a moment before clicking login
-                time.sleep(2)
+                time.sleep(random.uniform(2.0, 4.0))  # Human-like delay
                 
                 login_button = page.ele('xpath://*[@id="form-content"]//button | //button[contains(text(), "Log")] | //button[contains(@class, "login") or contains(., "Sign In")]', timeout=10)
                 if login_button:
@@ -376,11 +366,14 @@ def login_to_propstream(page: WebPage, email: str, password: str) -> None:
                 
                 # Wait for navigation
                 page.wait.doc_loaded(timeout=20)
-                time.sleep(3)
+                time.sleep(random.uniform(5.0, 8.0))  # Longer human-like delay after login
                 
                 # Handle any browser dialogs/alerts that might be blocking
                 logging.info("=== HANDLING BROWSER DIALOGS ===")
                 dialog_handled = False
+                
+                # Add extra delay to prevent rate limiting
+                time.sleep(5)
                 
                 # Try multiple methods to handle dialogs/alerts
                 try:
@@ -388,7 +381,7 @@ def login_to_propstream(page: WebPage, email: str, password: str) -> None:
                     page.handle_alert(accept=True, timeout=3)
                     logging.info("✅ Handled browser alert with handle_alert")
                     dialog_handled = True
-                    time.sleep(3)
+                    time.sleep(5)  # Increased delay
                 except Exception as e:
                     logging.info(f"handle_alert method failed: {e}")
                 
@@ -481,14 +474,25 @@ def login_to_propstream(page: WebPage, email: str, password: str) -> None:
                     
                     # Check for error messages on the login page
                     error_messages = page.eles('xpath://*[contains(@class, "error") or contains(@class, "alert") or contains(text(), "Invalid") or contains(text(), "incorrect")]')
+                    account_lockout_detected = False
                     if error_messages:
                         for i, error in enumerate(error_messages[:3]):
                             try:
                                 error_text = error.text.strip()
                                 if error_text:
                                     logging.error(f"Login error message {i+1}: {error_text}")
+                                    # Check for account lockout warning
+                                    if "attempt remaining" in error_text.lower() or "account is locked" in error_text.lower():
+                                        account_lockout_detected = True
+                                        logging.critical("🚨 ACCOUNT LOCKOUT WARNING DETECTED!")
                             except Exception:
                                 pass
+                    
+                    # If account lockout is detected, wait much longer
+                    if account_lockout_detected:
+                        lockout_delay = random.uniform(300, 600)  # 5-10 minutes
+                        logging.critical(f"⚠️  Account lockout warning - waiting {lockout_delay/60:.1f} minutes before retry")
+                        time.sleep(lockout_delay)
                     
                     # Check if we need to solve CAPTCHA or other verification
                     captcha = page.ele('xpath://*[contains(@class, "captcha") or contains(@class, "recaptcha")]', timeout=2)
@@ -503,7 +507,12 @@ def login_to_propstream(page: WebPage, email: str, password: str) -> None:
                     logging.info("✓ Successfully logged in and navigated away from login page")
                     
                     # Take screenshot of successful login destination
-                    take_screenshot(page, f"03c_successful_login_attempt_{attempt}.png", f"Successful login destination (attempt {attempt})")
+                    # take_screenshot(page, f"03c_successful_login_attempt_{attempt}.png", f"Successful login destination (attempt {attempt})")
+                    
+                    # Add delay after successful login to avoid detection
+                    delay = random.uniform(10.0, 20.0)
+                    logging.info(f"⏱️  Adding {delay:.1f}s delay after successful login to avoid detection")
+                    time.sleep(delay)
                     
                 break
             except Exception as e:
@@ -561,17 +570,14 @@ def search_property(page: WebPage, address_format: str, apn: str, county: str, s
             
             if "login.propstream.com" in current_url_before_search:
                 logging.error("⚠️  Redirected to login page when trying to access search - session expired!")
-                take_screenshot(page, f"04_redirected_to_login_attempt_{attempt+1}.png", f"Redirected to login (attempt {attempt+1})")
+                # take_screenshot(page, f"04_redirected_to_login_attempt_{attempt+1}.png", f"Redirected to login (attempt {attempt+1})")
                 
                 # Re-login and try again
                 logging.info("🔄 Session expired - attempting to re-login...")
                 try:
                     login_to_propstream(page, EMAIL, PASSWORD)
                     
-                    # Update the browser login status
-                    bid = _get_browser_id(page)
-                    _browser_logged_in[bid] = True
-                    
+                    browser_pool.mark_session_valid()
                     logging.info("✅ Re-login successful, continuing with search...")
                     
                     # Try to navigate to search page again
@@ -585,19 +591,16 @@ def search_property(page: WebPage, address_format: str, apn: str, county: str, s
                     
                     if "login.propstream.com" in current_url_after_relogin:
                         logging.error("🚨 Still redirected to login after re-login attempt")
-                        # Mark as not logged in
-                        _browser_logged_in[bid] = False
+                        browser_pool.invalidate_session()
                         raise Exception("Re-login failed - still redirected to login page")
                     
                 except Exception as e:
                     logging.error(f"Re-login failed: {e}")
-                    # Mark as not logged in on failure
-                    bid = _get_browser_id(page)
-                    _browser_logged_in[bid] = False
+                    browser_pool.invalidate_session()
                     raise Exception("Session expired and re-login failed")
             
             # Take screenshot of search page
-            take_screenshot(page, f"04_search_page_attempt_{attempt+1}.png", f"Search page loaded (attempt {attempt+1})")
+            # take_screenshot(page, f"04_search_page_attempt_{attempt+1}.png", f"Search page loaded (attempt {attempt+1})")
             logging.info(f"Successfully on search page: {current_url_before_search}")
             
             # Log page state
@@ -747,7 +750,7 @@ def search_property(page: WebPage, address_format: str, apn: str, county: str, s
             time.sleep(5)
             
             # Take screenshot after search to see the results
-            take_screenshot(page, f"05_after_search_attempt_{attempt+1}.png", f"After search performed (attempt {attempt+1})")
+            # take_screenshot(page, f"05_after_search_attempt_{attempt+1}.png", f"After search performed (attempt {attempt+1})")
             logging.info(f"URL after search: {page.url}")
             
             # Debug: Log page content to understand structure
@@ -862,7 +865,7 @@ def search_property(page: WebPage, address_format: str, apn: str, county: str, s
                 time.sleep(5)  # Wait for dynamic content to load
                 
                 # Take screenshot of details page
-                take_screenshot(page, f"06_property_details_page_attempt_{attempt+1}.png", f"Property details page (attempt {attempt+1})")
+                # take_screenshot(page, f"06_property_details_page_attempt_{attempt+1}.png", f"Property details page (attempt {attempt+1})")
                 logging.info(f"✅ Successfully navigated to details page. URL: {page.url}")
                 
             else:
@@ -983,7 +986,7 @@ def extract_property_info(page: WebPage) -> Optional[Dict]:
         logging.info("Extracting property information from PropStream details page...")
         
         # Take screenshot of the page we're extracting from
-        take_screenshot(page, "10_extraction_page.png", "Page during property info extraction")
+        # take_screenshot(page, "10_extraction_page.png", "Page during property info extraction")
         
         # Log current page state for debugging
         logging.info(f"=== CURRENT PAGE STATE ===")
@@ -1546,6 +1549,21 @@ async def _process_valuation(property_request: PropertyRequest):
     Process a property valuation request, fetching data from Propstream and Zillow.
     Uses cached results if available and stores new results in Redis.
     """
+    global last_request_time
+    
+    # Rate limiting to prevent PropStream blocking
+    current_time = time.time()
+    time_since_last_request = current_time - last_request_time
+    if time_since_last_request < MIN_REQUEST_INTERVAL:
+        wait_time = MIN_REQUEST_INTERVAL - time_since_last_request
+        # Add random variation to make timing more human-like
+        random_delay = random.uniform(15, 45)  # 15-45 seconds additional random delay
+        total_wait = wait_time + random_delay
+        logging.info(f"⏱️  Rate limiting: waiting {total_wait:.1f} seconds before next request")
+        await asyncio.sleep(total_wait)
+    
+    last_request_time = time.time()
+    
     cleaned_apn = clean_apn(property_request.apn)
     cache_key = generate_cache_key(property_request)
     
