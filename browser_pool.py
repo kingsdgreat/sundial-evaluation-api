@@ -5,18 +5,23 @@ from DrissionPage import ChromiumOptions, WebPage
 import logging
 import os
 import random
+import time
 
 class BrowserPool:
-    def __init__(self, pool_size: int = 3):  # Increased to 3 per instance
+    def __init__(self, pool_size: int = 2):  # Reduced from 3 to 2 to minimize session conflicts
         self.pool_size = pool_size
         self.browsers: List[WebPage] = []
         self.available_browsers: asyncio.Queue = asyncio.Queue()
         self.lock = asyncio.Lock()
         self.persistent_browser: Optional[WebPage] = None
         self.session_valid = False
+        self.session_created_at = None
+        self.max_session_age = 1800  # 30 minutes max session age
+        self.request_count = 0  # Track number of requests
+        self.refresh_after_requests = 1  # Refresh session after EVERY request to prevent conflicts
         
     async def initialize(self):
-        """Initialize browser pool"""
+        """Initialize browser pool with better error handling"""
         for i in range(self.pool_size):
             try:
                 browser = self._create_browser()
@@ -25,6 +30,7 @@ class BrowserPool:
                 logging.info(f"Browser {i+1}/{self.pool_size} initialized successfully")
             except Exception as e:
                 logging.error(f"Failed to initialize browser {i+1}: {e}")
+                # Continue with fewer browsers rather than failing completely
                 
     def _create_browser(self) -> WebPage:
         co = ChromiumOptions()
@@ -54,44 +60,55 @@ class BrowserPool:
             'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
             'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
         ]
-        selected_ua = random.choice(user_agents)
-        co.set_user_agent(selected_ua)
+        co.set_user_agent(random.choice(user_agents))
         
-        # Randomized viewport size
-        widths = [1366, 1440, 1920, 1280, 1536]
-        heights = [768, 900, 1080, 720, 864]
-        width = random.choice(widths)
-        height = random.choice(heights)
-        co.set_argument(f'--window-size={width},{height}')
+        # Additional randomization
+        co.set_argument(f'--window-size={random.randint(1200, 1920)},{random.randint(800, 1080)}')
         
-        # Memory optimization
-        co.set_argument('--memory-pressure-off')
-        co.set_argument('--max_old_space_size=512')
-        
-        browser = WebPage(chromium_options=co)
-        
-        # Additional stealth JavaScript execution
+        # Create browser with timeout handling
         try:
-            browser.run_js_loaded('''
-                Object.defineProperty(navigator, 'webdriver', {
-                    get: () => undefined,
-                });
-                
-                // Remove automation indicators
-                delete window.chrome.runtime.onConnect;
-                
-                // Override plugins
-                Object.defineProperty(navigator, 'plugins', {
-                    get: () => [1, 2, 3, 4, 5],
-                });
-                
-                // Override languages
-                Object.defineProperty(navigator, 'languages', {
-                    get: () => ['en-US', 'en'],
-                });
-            ''')
+            browser = WebPage(chromium_options=co, timeout=30)  # Add timeout
+            
+            # Set timeouts
+            browser.set.timeouts(base=20, page_load=30, script=20)
+            
+            # Apply stealth measures
+            try:
+                stealth_js = """
+                function(){
+                    // Only modify if not already modified
+                    if (navigator.webdriver !== undefined) {
+                        Object.defineProperty(navigator, 'webdriver', {
+                            get: () => undefined,
+                        });
+                    }
+                    
+                    // Remove automation indicators safely
+                    if (window.chrome && window.chrome.runtime) {
+                        try {
+                            delete window.chrome.runtime.onConnect;
+                        } catch(e) {}
+                    }
+                    
+                    // Override plugins safely
+                    if (navigator.plugins.length === 0) {
+                        Object.defineProperty(navigator, 'plugins', {
+                            get: () => [1, 2, 3, 4, 5],
+                        });
+                    }
+                    
+                    // Override languages
+                    Object.defineProperty(navigator, 'languages', {
+                        get: () => ['en-US', 'en'],
+                    });
+                }
+                """
+                browser.run_js(stealth_js)
+            except Exception as e:
+                logging.warning(f"Could not execute stealth JS: {e}")
         except Exception as e:
-            logging.warning(f"Could not execute stealth JS: {e}")
+            logging.error(f"Failed to create browser: {e}")
+            raise
         
         return browser
     
@@ -99,6 +116,20 @@ class BrowserPool:
     async def get_browser(self):
         """Get persistent browser instance to maintain session"""
         async with self.lock:
+            # Increment request count
+            self.request_count += 1
+            
+            # Check if we need to refresh session
+            if self.request_count >= self.refresh_after_requests:
+                logging.info(f"🔄 Session refresh needed after {self.request_count} requests")
+                self.invalidate_session()
+                self.request_count = 0
+            
+            # Check if session is too old
+            if self.session_created_at and time.time() - self.session_created_at > self.max_session_age:
+                logging.info("🕐 Session is too old, invalidating...")
+                self.invalidate_session()
+            
             # Check if we have a valid persistent browser
             if self.persistent_browser is None or not self.session_valid:
                 # Create new persistent browser
@@ -112,9 +143,10 @@ class BrowserPool:
                 
                 self.persistent_browser = self._create_browser()
                 self.session_valid = False  # Will be set to True after successful login
+                self.session_created_at = None
                 logging.info("🆕 Created new persistent browser instance")
             else:
-                logging.info("♻️  Reusing existing persistent browser session")
+                logging.info(f"♻️  Reusing existing persistent browser session (request {self.request_count})")
         
         try:
             yield self.persistent_browser
@@ -122,20 +154,46 @@ class BrowserPool:
             # If there's an error, mark session as invalid
             logging.warning(f"Error with persistent browser, will recreate: {e}")
             self.session_valid = False
+            self.session_created_at = None
             raise
     
     def mark_session_valid(self):
         """Mark the current session as valid (called after successful login)"""
         self.session_valid = True
+        self.session_created_at = time.time()
         logging.info("✅ Browser session marked as valid")
     
     def invalidate_session(self):
         """Invalidate the current session (called when login fails)"""
         self.session_valid = False
+        self.session_created_at = None
         logging.info("❌ Browser session marked as invalid")
+    
+    def force_refresh_session(self):
+        """Force refresh session (called after logout)"""
+        if self.persistent_browser:
+            try:
+                self.persistent_browser.close()
+                self.persistent_browser.quit()
+                logging.info("🧹 Force cleaned up browser after logout")
+            except:
+                pass
+        
+        self.persistent_browser = None
+        self.session_valid = False
+        self.session_created_at = None
+        self.request_count = 0
+        logging.info("🔄 Force refreshed browser session")
     
     async def cleanup(self):
         """Cleanup all browsers"""
+        if self.persistent_browser:
+            try:
+                self.persistent_browser.close()
+                self.persistent_browser.quit()
+            except Exception as e:
+                logging.warning(f"Error closing persistent browser: {e}")
+        
         for browser in self.browsers:
             try:
                 browser.close()

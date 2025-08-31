@@ -136,6 +136,22 @@ async def ensure_logged_in(page: WebPage):
             logging.warning(f"Error checking persistent session: {e}")
             browser_pool.invalidate_session()
     
+    # Force session refresh if needed (but be more conservative)
+    if browser_pool.request_count >= browser_pool.refresh_after_requests:
+        logging.info(f"🔄 Forcing session refresh due to request count ({browser_pool.request_count})")
+        browser_pool.invalidate_session()
+        # Reset request count after refresh
+        browser_pool.request_count = 0
+    
+    # Additional check: if we've had recent failures, force refresh more aggressively
+    if hasattr(browser_pool, 'recent_failures'):
+        if browser_pool.recent_failures >= 2:
+            logging.info("🔄 Forcing session refresh due to recent failures")
+            browser_pool.invalidate_session()
+            browser_pool.recent_failures = 0
+    else:
+        browser_pool.recent_failures = 0
+    
     # Need to login
     logging.info("🔑 Performing login...")
     await asyncio.get_event_loop().run_in_executor(
@@ -213,11 +229,21 @@ def get_state_abbreviation(state: str) -> str:
     logging.info(f"State conversion: Input '{state}' -> Converted to '{abbr}'")
     return abbr
 
-def take_screenshot(page: WebPage, filename: str, description: str = "") -> None:
+def take_screenshot(page: WebPage, filename: str, description: str = "", property_info: str = "") -> None:
     """Take a screenshot for debugging purposes"""
     try:
-        # Save to current directory so it's accessible outside Docker
-        screenshot_path = f"./{filename}"
+        # Create screenshots directory if it doesn't exist
+        import os
+        os.makedirs("./screenshots", exist_ok=True)
+        
+        # Add property info to filename if provided
+        if property_info:
+            base_name = os.path.splitext(filename)[0]
+            ext = os.path.splitext(filename)[1]
+            filename = f"{base_name}_{property_info}{ext}"
+        
+        # Save to screenshots directory
+        screenshot_path = f"./screenshots/{filename}"
         page.get_screenshot(path=screenshot_path)
         logging.info(f"📸 Screenshot saved: {screenshot_path} - {description}")
     except Exception as e:
@@ -375,15 +401,65 @@ def login_to_propstream(page: WebPage, email: str, password: str) -> None:
                 # Add extra delay to prevent rate limiting
                 time.sleep(5)
                 
-                # Try multiple methods to handle dialogs/alerts
+                # Handle session conflict popups specifically
                 try:
-                    # Method 1: DrissionPage alert handling
-                    page.handle_alert(accept=True, timeout=3)
-                    logging.info("✅ Handled browser alert with handle_alert")
-                    dialog_handled = True
-                    time.sleep(5)  # Increased delay
+                    # Look for session conflict popup
+                    session_popup_selectors = [
+                        'xpath://div[contains(text(), "username you are using is currently still logged in")]',
+                        'xpath://div[contains(text(), "prior session not being properly logged out")]',
+                        'xpath://div[contains(text(), "another user is using the same account credentials")]',
+                        'xpath://*[contains(text(), "PROCEED") and contains(text(), "Log Out")]',
+                        'xpath://button[contains(text(), "Proceed")]',
+                        'xpath://button[contains(text(), "Log Out")]'
+                    ]
+                    
+                    session_popup_found = False
+                    for selector in session_popup_selectors:
+                        try:
+                            popup_element = page.ele(selector, timeout=3)
+                            if popup_element:
+                                logging.info(f"🔍 Found session conflict popup with selector: {selector}")
+                                session_popup_found = True
+                                break
+                        except Exception:
+                            continue
+                    
+                    if session_popup_found:
+                        # Click "Proceed" to continue with current session
+                        try:
+                            proceed_button = page.ele('xpath://button[contains(text(), "Proceed")]', timeout=5)
+                            if proceed_button:
+                                proceed_button.click()
+                                logging.info("✅ Clicked 'Proceed' on session conflict popup")
+                                time.sleep(3)
+                                dialog_handled = True
+                        except Exception as e:
+                            logging.warning(f"Could not click Proceed button: {e}")
+                            
+                            # Fallback: try to click any button in the popup
+                            try:
+                                popup_buttons = page.eles('xpath://div[contains(@class, "modal") or contains(@class, "popup") or contains(@class, "dialog")]//button')
+                                if popup_buttons:
+                                    popup_buttons[0].click()  # Click first button (usually Proceed)
+                                    logging.info("✅ Clicked first button in session conflict popup")
+                                    time.sleep(3)
+                                    dialog_handled = True
+                            except Exception as e2:
+                                logging.warning(f"Could not click any popup button: {e2}")
+                
                 except Exception as e:
-                    logging.info(f"handle_alert method failed: {e}")
+                    logging.warning(f"Error handling session conflict popup: {e}")
+                
+                # Try multiple methods to handle other dialogs/alerts
+                if not dialog_handled:
+                    try:
+                        # Method 1: DrissionPage alert handling
+                        page.handle_alert(accept=True, timeout=3)
+                        logging.info("✅ Handled browser alert with handle_alert")
+                        dialog_handled = True
+                        time.sleep(5)  # Increased delay
+                    except Exception as e:
+                        logging.info(f"handle_alert method failed: {e}")
                 
                 if not dialog_handled:
                     try:
@@ -408,7 +484,7 @@ def login_to_propstream(page: WebPage, email: str, password: str) -> None:
                 if not dialog_handled:
                     logging.info("No browser dialogs found or all methods failed")
                 
-                # Take screenshot after login
+                # Take screenshot after login (generic, no property info needed)
                 take_screenshot(page, "02_after_login.png", "After login button clicked")
                 
                 # Look for proceed button with multiple selectors targeting the exact structure
@@ -499,8 +575,26 @@ def login_to_propstream(page: WebPage, email: str, password: str) -> None:
                     if captcha:
                         logging.error("CAPTCHA detected - manual intervention may be required")
                     
-                    # This might be a credentials issue
-                    if attempt == max_attempts - 1:
+                    # Enhanced retry logic for login failures
+                    if attempt < max_attempts:
+                        retry_delay = random.uniform(15.0, 30.0)  # Longer delay between login attempts
+                        logging.warning(f"⚠️  Login attempt {attempt} failed - waiting {retry_delay:.1f}s before retry")
+                        time.sleep(retry_delay)
+                        
+                        # Clear browser cache/cookies before retry
+                        try:
+                            page.clear_cache()
+                            page.clear_cookies()
+                            logging.info("🧹 Cleared browser cache and cookies for retry")
+                        except Exception as e:
+                            logging.warning(f"Could not clear cache/cookies: {e}")
+                        
+                        # Refresh page and try again
+                        page.refresh()
+                        page.wait.doc_loaded(timeout=20)
+                        time.sleep(5)  # Wait for page to fully load
+                        continue
+                    else:
                         logging.error("Login failed on final attempt - check credentials or account status")
                         raise Exception("Login failed - check credentials")
                 else:
@@ -528,6 +622,73 @@ def login_to_propstream(page: WebPage, email: str, password: str) -> None:
         logging.error(f"Login failed with error: {str(e)}")
         raise
 
+def logout_from_propstream(page: WebPage) -> None:
+    """
+    Logout from PropStream to prevent session conflicts.
+    """
+    try:
+        logging.info("🚪 Attempting to logout from PropStream...")
+        
+        # Look for the logout link in the sidebar
+        logout_selectors = [
+            'xpath://a[@href="/logout"]',
+            'xpath://a[contains(text(), "Log Out")]',
+            'xpath://a[contains(text(), "Logout")]',
+            'xpath://*[contains(text(), "Log Out")]',
+            'xpath://button[contains(text(), "Log Out")]',
+            'xpath://button[contains(text(), "Logout")]'
+        ]
+        
+        logout_clicked = False
+        for selector in logout_selectors:
+            try:
+                logout_element = page.ele(selector, timeout=5)
+                if logout_element:
+                    logging.info(f"✅ Found logout element with selector: {selector}")
+                    logout_element.click()
+                    time.sleep(3)  # Wait for logout to complete
+                    logging.info("✅ Logout element clicked successfully")
+                    logout_clicked = True
+                    break
+            except Exception as e:
+                logging.debug(f"Logout selector {selector} failed: {e}")
+                continue
+        
+        if not logout_clicked:
+            logging.warning("⚠️ Could not find logout element - trying alternative approach")
+            # Try to navigate directly to logout URL
+            try:
+                page.get("https://app.propstream.com/logout")
+                time.sleep(3)
+                logging.info("✅ Navigated to logout URL directly")
+            except Exception as e:
+                logging.warning(f"Could not navigate to logout URL: {e}")
+        
+        # Verify logout was successful by checking if we're redirected to login page
+        time.sleep(2)
+        current_url = page.url
+        if "login.propstream.com" in current_url or "logout" in current_url:
+            logging.info("✅ Logout successful - redirected to login page")
+        else:
+            logging.warning(f"⚠️ Logout may not have been successful - current URL: {current_url}")
+        
+        # Enhanced cleanup after logout
+        try:
+            # Clear all cookies and cache to ensure clean state
+            page.clear_cookies()
+            page.clear_cache()
+            logging.info("🧹 Cleared cookies and cache after logout")
+        except Exception as e:
+            logging.warning(f"Could not clear cookies/cache: {e}")
+        
+        # Wait a bit longer to ensure complete logout
+        time.sleep(5)
+            
+    except Exception as e:
+        logging.error(f"Error during logout: {str(e)}")
+        # Don't raise the exception - just log it and continue
+        # This prevents logout failures from breaking the entire process
+
 @lru_cache(maxsize=1000)
 def get_cached_state_abbreviation(state: str) -> str:
     return get_state_abbreviation(state)
@@ -538,6 +699,9 @@ def search_property(page: WebPage, address_format: str, apn: str, county: str, s
     """
     state_abbr = get_cached_state_abbreviation(state)
     county = county.strip()
+    
+    # Create property_info for screenshots
+    property_info = f"{apn}_{county}_{state_abbr}".replace(" ", "_").replace(",", "")
     
     if county.lower().endswith('county'):
         base_name = county[:-(len('county'))].strip()
@@ -572,32 +736,9 @@ def search_property(page: WebPage, address_format: str, apn: str, county: str, s
                 logging.error("⚠️  Redirected to login page when trying to access search - session expired!")
                 # take_screenshot(page, f"04_redirected_to_login_attempt_{attempt+1}.png", f"Redirected to login (attempt {attempt+1})")
                 
-                # Re-login and try again
-                logging.info("🔄 Session expired - attempting to re-login...")
-                try:
-                    login_to_propstream(page, EMAIL, PASSWORD)
-                    
-                    browser_pool.mark_session_valid()
-                    logging.info("✅ Re-login successful, continuing with search...")
-                    
-                    # Try to navigate to search page again
-                    page.get("https://app.propstream.com/search")
-                    page.wait.load_start()
-                    page.wait.doc_loaded(timeout=20)
-                    time.sleep(5)
-                    
-                    current_url_after_relogin = page.url
-                    logging.info(f"URL after re-login and navigation: {current_url_after_relogin}")
-                    
-                    if "login.propstream.com" in current_url_after_relogin:
-                        logging.error("🚨 Still redirected to login after re-login attempt")
-                        browser_pool.invalidate_session()
-                        raise Exception("Re-login failed - still redirected to login page")
-                    
-                except Exception as e:
-                    logging.error(f"Re-login failed: {e}")
-                    browser_pool.invalidate_session()
-                    raise Exception("Session expired and re-login failed")
+                # Mark session as invalid and force retry with fresh browser
+                browser_pool.invalidate_session()
+                raise Exception(f"Session expired on attempt {attempt + 1} - will retry with fresh browser")
             
             # Take screenshot of search page
             # take_screenshot(page, f"04_search_page_attempt_{attempt+1}.png", f"Search page loaded (attempt {attempt+1})")
@@ -753,6 +894,108 @@ def search_property(page: WebPage, address_format: str, apn: str, county: str, s
             # take_screenshot(page, f"05_after_search_attempt_{attempt+1}.png", f"After search performed (attempt {attempt+1})")
             logging.info(f"URL after search: {page.url}")
             
+            # Take screenshot of search results immediately after search
+            take_screenshot(page, "01_search_results.png", "Search results page", property_info)
+            
+            # Check for and handle the specific session conflict dialog
+            logging.info("🔍 Checking for session conflict dialog...")
+            try:
+                # Look for session conflict popups with multiple selectors
+                session_popup_selectors = [
+                    'xpath://div[contains(@class, "src-app-components-SessionOverlay-style__oBRns__popup")]',
+                    'xpath://div[contains(text(), "username you are using is currently still logged in")]',
+                    'xpath://div[contains(text(), "prior session not being properly logged out")]',
+                    'xpath://div[contains(text(), "another user is using the same account credentials")]',
+                    'xpath://*[contains(text(), "PROCEED") and contains(text(), "Log Out")]',
+                    'xpath://div[contains(@class, "modal") or contains(@class, "popup") or contains(@class, "dialog")]',
+                    'xpath://button[contains(text(), "Proceed")]',
+                    'xpath://button[contains(text(), "Log Out")]'
+                ]
+                
+                session_popup_found = False
+                for selector in session_popup_selectors:
+                    try:
+                        popup_element = page.ele(selector, timeout=3)
+                        if popup_element:
+                            logging.info(f"⚠️ Found session conflict popup with selector: {selector}")
+                            session_popup_found = True
+                            break
+                    except Exception:
+                        continue
+                
+                if session_popup_found:
+                    # Click "Proceed" to continue with current session
+                    try:
+                        proceed_button = page.ele('xpath://button[contains(text(), "Proceed")]', timeout=5)
+                        if proceed_button:
+                            proceed_button.click()
+                            logging.info("✅ Clicked 'Proceed' on session conflict popup")
+                            time.sleep(3)
+                        else:
+                            # Fallback: try to click any button in the popup
+                            popup_buttons = page.eles('xpath://div[contains(@class, "modal") or contains(@class, "popup") or contains(@class, "dialog")]//button')
+                            if popup_buttons:
+                                popup_buttons[0].click()  # Click first button (usually Proceed)
+                                logging.info("✅ Clicked first button in session conflict popup")
+                                time.sleep(3)
+                    except Exception as e:
+                        logging.warning(f"Could not handle session conflict popup: {e}")
+                else:
+                    logging.info("✅ No session conflict dialog found")
+            except Exception as e:
+                logging.warning(f"Could not check for session conflict dialog: {e}")
+            
+            # Try to switch from map view to list/table view to find Details buttons
+            logging.info("🗺️ Attempting to switch from map view to list view...")
+            try:
+                # Look for view toggle buttons (map/list view) - more aggressive search
+                view_selectors = [
+                    'xpath://button[contains(text(), "List") or contains(text(), "Table") or contains(text(), "View") or contains(text(), "Toggle")]',
+                    'xpath://button[contains(@title, "List") or contains(@title, "Table") or contains(@title, "View")]',
+                    'xpath://button[contains(@aria-label, "List") or contains(@aria-label, "Table") or contains(@aria-label, "View")]',
+                    'xpath://div[contains(@class, "view") or contains(@class, "toggle")]//button',
+                    'xpath://button[contains(@class, "view") or contains(@class, "toggle")]',
+                    'xpath://*[contains(text(), "List View") or contains(text(), "Table View") or contains(text(), "Map View")]'
+                ]
+                
+                view_found = False
+                for selector in view_selectors:
+                    view_buttons = page.eles(selector)
+                    if view_buttons:
+                        logging.info(f"🔍 Found {len(view_buttons)} potential view toggle buttons with selector: {selector}")
+                        for i, btn in enumerate(view_buttons):
+                            btn_text = btn.text.strip()
+                            btn_title = btn.attr('title') or ''
+                            btn_class = btn.attr('class') or ''
+                            logging.info(f"Button {i+1}: text='{btn_text}', title='{btn_title}', class='{btn_class[:50]}'")
+                            
+                            # Click any button that might switch views
+                            if any(keyword in btn_text.lower() or keyword in btn_title.lower() 
+                                   for keyword in ['list', 'table', 'view', 'toggle', 'switch']):
+                                logging.info(f"🎯 Clicking view toggle button: {btn_text}")
+                                btn.click()
+                                time.sleep(3)  # Wait for view to change
+                                view_found = True
+                                break
+                        if view_found:
+                            break
+                
+                if not view_found:
+                    logging.info("⚠️ No view toggle buttons found - trying to click on table elements directly")
+                    # Try clicking on table headers or any clickable table elements
+                    table_headers = page.eles('xpath://table//th[contains(@class, "clickable") or contains(@style, "cursor")]')
+                    if table_headers:
+                        logging.info(f"🔍 Found {len(table_headers)} clickable table headers")
+                        for header in table_headers[:3]:  # Try first 3 headers
+                            try:
+                                header.click()
+                                time.sleep(2)
+                                logging.info("🎯 Clicked on table header")
+                            except:
+                                pass
+            except Exception as e:
+                logging.warning(f"Could not switch to list view: {e}")
+            
             # Debug: Log page content to understand structure
             logging.info("=== DEBUGGING PAGE CONTENT ===")
             try:
@@ -802,6 +1045,64 @@ def search_property(page: WebPage, address_format: str, apn: str, county: str, s
             # NEW: Navigate to property details page by clicking the Details anchor
             logging.info("=== NAVIGATING TO PROPERTY DETAILS PAGE ===")
             
+            # Wait for Details buttons to load dynamically - they load VERY slowly
+            logging.info("⏳ Waiting for Details buttons to load dynamically...")
+            
+            # Retry loop to wait for Details buttons to appear
+            details_found = False
+            max_details_wait = 12  # Try for up to 60 seconds
+            for details_wait in range(max_details_wait):
+                # Take screenshot during loading/waiting phase
+                if details_wait == 0:  # First attempt
+                    take_screenshot(page, "02_loading_waiting.png", "Loading/waiting for Details buttons", property_info)
+                time.sleep(5)  # Wait 5 seconds each iteration
+                
+                # Scroll to ensure all elements are visible
+                try:
+                    page.scroll.to_bottom()
+                    time.sleep(1)
+                    page.scroll.to_top()
+                    time.sleep(1)
+                except Exception as e:
+                    logging.warning(f"Could not scroll page: {e}")
+                
+                # Check if Details buttons have appeared
+                try:
+                    html_content = page.html
+                    details_count = html_content.count("Details")
+                    textbutton_count = html_content.count("textButton")
+                    search_href_count = html_content.count('href="/search/')
+                    table_rows = html_content.count("<tr>")
+                    
+                    logging.info(f"⏳ Wait attempt {details_wait + 1}/{max_details_wait}: Details={details_count}, textButton={textbutton_count}, search_href={search_href_count}, table_rows={table_rows}")
+                    
+                    # More flexible condition - if we have table rows and either Details or search_href, proceed
+                    if (details_count > 0 and textbutton_count > 0 and search_href_count > 0) or (table_rows > 5 and search_href_count > 0):
+                        logging.info("✅ Details buttons or search results have appeared!")
+                        # Take screenshot when Details buttons are found
+                        take_screenshot(page, "03_details_found.png", "Details buttons found", property_info)
+                        details_found = True
+                        break
+                        
+                except Exception as e:
+                    logging.warning(f"Could not check for Details buttons: {e}")
+            
+            if not details_found:
+                # Take screenshot of the page when Details buttons are not found (final failure state)
+                take_screenshot(page, "03_no_details_found.png", "No Details buttons found - final state", property_info)
+                logging.error("❌ Details buttons did not appear after extended wait - forcing session refresh")
+                # Force session refresh when Details buttons don't appear
+                browser_pool.invalidate_session()
+                raise Exception(f"Details buttons did not appear after extended wait on attempt {attempt + 1} - forcing session refresh")
+            
+            # Final wait for any pending JavaScript to complete
+            try:
+                page.run_js("return document.readyState === 'complete'")
+                time.sleep(2)
+                logging.info("✅ Page ready state confirmed")
+            except Exception as e:
+                logging.warning(f"Could not check page ready state: {e}")
+            
             # Look for the Details anchor in the search results
             # Based on the actual HTML structure: <a class="src-components-base-Button-style__MOJLh__border-blue src-app-Search-Property-style__fpSUR__textButton" href="/search/1848199534"><span class="src-components-base-Button-style__FBPrq__text">Details</span></a>
             details_selectors = [
@@ -822,6 +1123,27 @@ def search_property(page: WebPage, address_format: str, apn: str, county: str, s
                 'xpath://*[contains(@class, "table")]//a[contains(text(), "Details")]',
                 'xpath://tr//a[text()="Details"]'
             ]
+            
+            # Debug: Check what's actually in the HTML before trying selectors
+            try:
+                html_content = page.html
+                details_count = html_content.count("Details")
+                logging.info(f"🔍 HTML contains {details_count} occurrences of 'Details' text")
+                
+                # Check for common button patterns
+                button_patterns = [
+                    "textButton",
+                    "fpSUR",
+                    "Details",
+                    "href=\"/search/",
+                    "class=\"src-app-Search-Property"
+                ]
+                for pattern in button_patterns:
+                    count = html_content.count(pattern)
+                    logging.info(f"🔍 HTML contains {count} occurrences of '{pattern}'")
+                    
+            except Exception as e:
+                logging.warning(f"Could not analyze HTML content: {e}")
             
             details_anchor = None
             for i, selector in enumerate(details_selectors):
@@ -855,6 +1177,26 @@ def search_property(page: WebPage, address_format: str, apn: str, county: str, s
                     except Exception as e:
                         logging.warning(f"Error examining anchor {i+1}: {e}")
                         continue
+                
+                # If still no Details anchor, try to find any clickable element in search results
+                if not details_anchor:
+                    logging.info("🔍 Trying to find any clickable element in search results...")
+                    try:
+                        # Look for any anchor with href containing /search/ (property detail links)
+                        search_anchors = page.eles('xpath://a[contains(@href, "/search/")]')
+                        if search_anchors:
+                            logging.info(f"✅ Found {len(search_anchors)} search result anchors")
+                            details_anchor = search_anchors[0]  # Use the first one
+                            logging.info("✅ Using first search result anchor as Details anchor")
+                        else:
+                            # Look for any clickable element in table rows
+                            table_links = page.eles('xpath://table//a')
+                            if table_links:
+                                logging.info(f"✅ Found {len(table_links)} table links")
+                                details_anchor = table_links[0]  # Use the first one
+                                logging.info("✅ Using first table link as Details anchor")
+                    except Exception as e:
+                        logging.warning(f"Could not find alternative clickable elements: {e}")
             
             if details_anchor:
                 logging.info("🎯 Clicking Details anchor to navigate to property details page...")
@@ -869,8 +1211,10 @@ def search_property(page: WebPage, address_format: str, apn: str, county: str, s
                 logging.info(f"✅ Successfully navigated to details page. URL: {page.url}")
                 
             else:
-                logging.warning("⚠️ Details anchor not found - will try to extract from current search results page")
-                # Continue with current page extraction as fallback
+                logging.error("❌ No Details anchor found - forcing session refresh and retry")
+                # Force session refresh when no Details buttons are found
+                browser_pool.invalidate_session()
+                raise Exception(f"No Details buttons found on attempt {attempt + 1} - forcing session refresh")
             
             # Property search and navigation completed - ready for data extraction
             logging.info("🎯 Property search and navigation completed - ready for data extraction")
@@ -879,10 +1223,19 @@ def search_property(page: WebPage, address_format: str, apn: str, county: str, s
         
         except Exception as e:
             logging.warning(f"Attempt {attempt + 1} failed: {str(e)}")
+            
+            # Track failures for session refresh logic
+            if "No Details buttons found" in str(e) or "Details anchor not found" in str(e):
+                browser_pool.recent_failures = getattr(browser_pool, 'recent_failures', 0) + 1
+                logging.info(f"📊 Details button failure count: {browser_pool.recent_failures}")
+            
             if attempt < max_retries - 1:
                 logging.info(f"Retrying in {retry_delay} seconds...")
                 time.sleep(retry_delay)
-                page.refresh()
+                # Force fresh browser on retry if we had Details button issues
+                if "No Details buttons found" in str(e) or "Details anchor not found" in str(e):
+                    logging.info("🔄 Forcing fresh browser due to Details button issues")
+                    browser_pool.invalidate_session()
             else:
                 logging.error(f"Property search failed after {max_retries} attempts: {str(e)}")
                 raise HTTPException(
@@ -1608,6 +1961,18 @@ async def _process_valuation(property_request: PropertyRequest):
                 logging.error("Failed to extract target property info")
                 raise HTTPException(status_code=500, detail="Failed to extract target property information")
 
+            # Logout after successful evaluation to prevent session conflicts
+            logging.info("🚪 Logging out after successful evaluation to prevent session conflicts...")
+            try:
+                await asyncio.get_event_loop().run_in_executor(None, logout_from_propstream, page)
+                logging.info("✅ Successfully logged out from PropStream")
+                
+                # Force refresh browser session after logout to ensure clean state
+                browser_pool.force_refresh_session()
+                logging.info("🔄 Force refreshed browser session after logout")
+            except Exception as e:
+                logging.warning(f"Could not logout from PropStream: {e}")
+            
             # Browser cleanup will be handled by the browser pool automatically
             logging.info("✅ Property extraction completed - browser will be cleaned up automatically")
 
