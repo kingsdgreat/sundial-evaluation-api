@@ -1,36 +1,29 @@
 import asyncio
 from contextlib import asynccontextmanager
-from typing import List, Optional
+from typing import Optional
 from DrissionPage import ChromiumOptions, WebPage
 import logging
-import os
 import random
 import time
 
 class BrowserPool:
-    def __init__(self, pool_size: int = 2):  # Reduced from 3 to 2 to minimize session conflicts
-        self.pool_size = pool_size
-        self.browsers: List[WebPage] = []
-        self.available_browsers: asyncio.Queue = asyncio.Queue()
-        self.lock = asyncio.Lock()
+    def __init__(self):
         self.persistent_browser: Optional[WebPage] = None
         self.session_valid = False
         self.session_created_at = None
-        self.max_session_age = 1800  # 30 minutes max session age
-        self.request_count = 0  # Track number of requests
-        self.refresh_after_requests = 1  # Refresh session after EVERY request to prevent conflicts
+        self.max_session_age = 3600  # 1 hour max session age
+        self.lock = asyncio.Lock()
         
     async def initialize(self):
-        """Initialize browser pool with better error handling"""
-        for i in range(self.pool_size):
-            try:
-                browser = self._create_browser()
-                self.browsers.append(browser)
-                await self.available_browsers.put(browser)
-                logging.info(f"Browser {i+1}/{self.pool_size} initialized successfully")
-            except Exception as e:
-                logging.error(f"Failed to initialize browser {i+1}: {e}")
-                # Continue with fewer browsers rather than failing completely
+        """Initialize single persistent browser"""
+        try:
+            self.persistent_browser = self._create_browser()
+            self.session_valid = False  # Will be set to True after successful login
+            self.session_created_at = None
+            logging.info("🆕 Initialized single persistent browser instance")
+        except Exception as e:
+            logging.error(f"Failed to initialize browser: {e}")
+            raise
                 
     def _create_browser(self) -> WebPage:
         co = ChromiumOptions()
@@ -67,7 +60,7 @@ class BrowserPool:
         
         # Create browser with timeout handling
         try:
-            browser = WebPage(chromium_options=co, timeout=30)  # Add timeout
+            browser = WebPage(chromium_options=co, timeout=30)
             
             # Set timeouts
             browser.set.timeouts(base=20, page_load=30, script=20)
@@ -114,17 +107,8 @@ class BrowserPool:
     
     @asynccontextmanager
     async def get_browser(self):
-        """Get persistent browser instance to maintain session"""
+        """Get the single persistent browser instance"""
         async with self.lock:
-            # Increment request count
-            self.request_count += 1
-            
-            # Check if we need to refresh session
-            if self.request_count >= self.refresh_after_requests:
-                logging.info(f"🔄 Session refresh needed after {self.request_count} requests")
-                self.invalidate_session()
-                self.request_count = 0
-            
             # Check if session is too old
             if self.session_created_at and time.time() - self.session_created_at > self.max_session_age:
                 logging.info("🕐 Session is too old, invalidating...")
@@ -146,7 +130,7 @@ class BrowserPool:
                 self.session_created_at = None
                 logging.info("🆕 Created new persistent browser instance")
             else:
-                logging.info(f"♻️  Reusing existing persistent browser session (request {self.request_count})")
+                logging.info("♻️  Using existing persistent browser session")
         
         try:
             yield self.persistent_browser
@@ -169,37 +153,14 @@ class BrowserPool:
         self.session_created_at = None
         logging.info("❌ Browser session marked as invalid")
     
-    def force_refresh_session(self):
-        """Force refresh session (called after logout)"""
-        if self.persistent_browser:
-            try:
-                self.persistent_browser.close()
-                self.persistent_browser.quit()
-                logging.info("🧹 Force cleaned up browser after logout")
-            except:
-                pass
-        
-        self.persistent_browser = None
-        self.session_valid = False
-        self.session_created_at = None
-        self.request_count = 0
-        logging.info("🔄 Force refreshed browser session")
-    
     async def cleanup(self):
-        """Cleanup all browsers"""
+        """Cleanup browser"""
         if self.persistent_browser:
             try:
                 self.persistent_browser.close()
                 self.persistent_browser.quit()
             except Exception as e:
                 logging.warning(f"Error closing persistent browser: {e}")
-        
-        for browser in self.browsers:
-            try:
-                browser.close()
-                browser.quit()
-            except Exception as e:
-                logging.warning(f"Error closing browser: {e}")
 
-# Global browser pool - smaller per instance since we have multiple instances
-browser_pool = BrowserPool(pool_size=3)
+# Global browser pool - single instance for sequential processing
+browser_pool = BrowserPool()

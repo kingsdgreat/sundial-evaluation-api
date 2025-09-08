@@ -107,7 +107,7 @@ import asyncio
 from browser_pool import browser_pool
 
 # Add semaphore to limit concurrent requests
-REQUEST_SEMAPHORE = asyncio.Semaphore(3)  # Align with browser pool size
+REQUEST_LOCK = asyncio.Lock()  # For sequential processing
 
 # Removed old browser tracking - now using persistent session in browser_pool
 
@@ -126,31 +126,22 @@ async def ensure_logged_in(page: WebPage):
         try:
             page.get('https://app.propstream.com/search')
             time.sleep(3)
-            if "app.propstream.com" in page.url:
+            
+            # Check if we got redirected to login page (session expired)
+            if "login.propstream.com" in page.url:
+                logging.warning("❌ Session expired - redirected to login page")
+                browser_pool.invalidate_session()
+                # Force immediate re-login instead of retrying
+                raise Exception("Session expired - need fresh login")
+            elif "app.propstream.com" in page.url:
                 logging.info("✅ Persistent session is still valid")
                 return
             else:
-                logging.warning("❌ Persistent session expired, need to re-login")
+                logging.warning("❌ Unexpected redirect during session validation")
                 browser_pool.invalidate_session()
         except Exception as e:
             logging.warning(f"Error checking persistent session: {e}")
             browser_pool.invalidate_session()
-    
-    # Force session refresh if needed (but be more conservative)
-    if browser_pool.request_count >= browser_pool.refresh_after_requests:
-        logging.info(f"🔄 Forcing session refresh due to request count ({browser_pool.request_count})")
-        browser_pool.invalidate_session()
-        # Reset request count after refresh
-        browser_pool.request_count = 0
-    
-    # Additional check: if we've had recent failures, force refresh more aggressively
-    if hasattr(browser_pool, 'recent_failures'):
-        if browser_pool.recent_failures >= 2:
-            logging.info("🔄 Forcing session refresh due to recent failures")
-            browser_pool.invalidate_session()
-            browser_pool.recent_failures = 0
-    else:
-        browser_pool.recent_failures = 0
     
     # Need to login
     logging.info("🔑 Performing login...")
@@ -740,13 +731,42 @@ def search_property(page: WebPage, address_format: str, apn: str, county: str, s
                 browser_pool.invalidate_session()
                 raise Exception(f"Session expired on attempt {attempt + 1} - will retry with fresh browser")
             
-            # Take screenshot of search page
-            # take_screenshot(page, f"04_search_page_attempt_{attempt+1}.png", f"Search page loaded (attempt {attempt+1})")
+            # Take screenshot of search page to debug
+            take_screenshot(page, f"04_search_page_attempt_{attempt+1}.png", f"Search page loaded (attempt {attempt+1})", property_info)
             logging.info(f"Successfully on search page: {current_url_before_search}")
             
             # Log page state
             logging.debug(f"Page title: {page.title}")
             logging.debug(f"Page URL: {page.url}")
+            
+            # Wait for page to fully load before looking for search input
+            logging.info("⏳ Waiting for page to fully load...")
+            
+            # Wait for page to fully load (inline function)
+            start_time = time.time()
+            timeout = 60
+            while time.time() - start_time < timeout:
+                if page.title and page.title != "Loading...":
+                    break
+                time.sleep(1)
+            else:
+                logging.warning("⚠️ Page still loading after 60 seconds")
+
+            # Additional wait for JavaScript to initialize
+            time.sleep(10)
+
+            # Check if page is still loading
+            if page.title == "Loading...":
+                logging.warning("⚠️ Page still loading after wait - trying to refresh")
+                page.refresh()
+                time.sleep(5)
+                # Wait again after refresh
+                start_time = time.time()
+                timeout = 30
+                while time.time() - start_time < timeout:
+                    if page.title and page.title != "Loading...":
+                        break
+                    time.sleep(1)
             
             # Locate search input field - based on the image, it's a prominent search bar
             search_input = page.ele('xpath://input[@placeholder="Enter County, City, Zip Code(s) or APN #"]', timeout=15)
@@ -754,7 +774,11 @@ def search_property(page: WebPage, address_format: str, apn: str, county: str, s
                 # Fallback to more generic selectors
                 search_input = page.ele('xpath://input[@type="text" or @name="search" or contains(@class, "search") or @placeholder[contains(., "search")]]', timeout=15)
                 if not search_input:
+                    # Take screenshot to see what page we're actually on
+                    take_screenshot(page, f"05_no_search_input_attempt_{attempt+1}.png", f"No search input found (attempt {attempt+1})", property_info)
                     logging.error(f"Search input not found. Page HTML: {page.html[:2000]}...")
+                    logging.error(f"Page title: {page.title}")
+                    logging.error(f"Current URL: {page.url}")
                     raise Exception("Search input field not found")
             
             # Clear any existing text and enter the address
@@ -1088,12 +1112,18 @@ def search_property(page: WebPage, address_format: str, apn: str, county: str, s
                     logging.warning(f"Could not check for Details buttons: {e}")
             
             if not details_found:
-                # Take screenshot of the page when Details buttons are not found (final failure state)
-                take_screenshot(page, "03_no_details_found.png", "No Details buttons found - final state", property_info)
-                logging.error("❌ Details buttons did not appear after extended wait - forcing session refresh")
-                # Force session refresh when Details buttons don't appear
-                browser_pool.invalidate_session()
-                raise Exception(f"Details buttons did not appear after extended wait on attempt {attempt + 1} - forcing session refresh")
+                logging.warning("⚠️ Details buttons did not appear after extended wait - refreshing page")
+                # Refresh the page and clear search input instead of forcing session refresh
+                page.refresh()
+                time.sleep(3)
+                # Clear search input and try again
+                search_input = page.ele('xpath://input[@placeholder="Enter County, City, Zip Code(s) or APN #"]', timeout=10)
+                if search_input:
+                    search_input.clear()
+                    logging.info(" Page refreshed and search input cleared - retrying search")
+                else:
+                    logging.warning("⚠️ Could not find search input after refresh")
+                raise Exception(f"Details buttons did not appear after extended wait on attempt {attempt + 1} - page refreshed")
             
             # Final wait for any pending JavaScript to complete
             try:
@@ -1219,6 +1249,16 @@ def search_property(page: WebPage, address_format: str, apn: str, county: str, s
             # Property search and navigation completed - ready for data extraction
             logging.info("🎯 Property search and navigation completed - ready for data extraction")
             
+            # Add this right after navigating to search page
+            logging.info(f"Page title after navigation: {page.title}")
+            logging.info(f"Page URL after navigation: {page.url}")
+            logging.info(f"Page HTML length: {len(page.html)} characters")
+
+            # Check if we're actually on the right page
+            if "propstream" not in page.url.lower():
+                logging.error(f"⚠️ Not on PropStream page! Current URL: {page.url}")
+                take_screenshot(page, f"06_wrong_page_attempt_{attempt+1}.png", f"Wrong page detected (attempt {attempt+1})", property_info)
+            
             return
         
         except Exception as e:
@@ -1232,8 +1272,10 @@ def search_property(page: WebPage, address_format: str, apn: str, county: str, s
             if attempt < max_retries - 1:
                 logging.info(f"Retrying in {retry_delay} seconds...")
                 time.sleep(retry_delay)
-                # Force fresh browser on retry if we had Details button issues
-                if "No Details buttons found" in str(e) or "Details anchor not found" in str(e):
+                # Don't force fresh browser for page refresh issues - just retry with same session
+                if "page refreshed" in str(e):
+                    logging.info(" Retrying with same session after page refresh")
+                elif "No Details buttons found" in str(e) or "Details anchor not found" in str(e):
                     logging.info("🔄 Forcing fresh browser due to Details button issues")
                     browser_pool.invalidate_session()
             else:
@@ -1893,7 +1935,8 @@ async def health_check():
 
 @app.post("/valuate-property", response_model=ValuationResponse)
 async def valuate_property(property_request: PropertyRequest):
-    async with REQUEST_SEMAPHORE:
+    # Sequential processing - wait for turn
+    async with REQUEST_LOCK:
         return await _process_valuation(property_request)
 
 
@@ -1960,18 +2003,6 @@ async def _process_valuation(property_request: PropertyRequest):
             if not target_property_info:
                 logging.error("Failed to extract target property info")
                 raise HTTPException(status_code=500, detail="Failed to extract target property information")
-
-            # Logout after successful evaluation to prevent session conflicts
-            logging.info("🚪 Logging out after successful evaluation to prevent session conflicts...")
-            try:
-                await asyncio.get_event_loop().run_in_executor(None, logout_from_propstream, page)
-                logging.info("✅ Successfully logged out from PropStream")
-                
-                # Force refresh browser session after logout to ensure clean state
-                browser_pool.force_refresh_session()
-                logging.info("🔄 Force refreshed browser session after logout")
-            except Exception as e:
-                logging.warning(f"Could not logout from PropStream: {e}")
             
             # Browser cleanup will be handled by the browser pool automatically
             logging.info("✅ Property extraction completed - browser will be cleaned up automatically")
@@ -2041,6 +2072,51 @@ async def _process_valuation(property_request: PropertyRequest):
         finally:
             # Release rate limit slot
             await api_rate_limiter.release(rate_limit_key)
+
+def extract_property_from_search_results(page: WebPage, apn: str) -> Optional[Dict]:
+    """Extract property data directly from search results table when Details buttons don't exist"""
+    try:
+        logging.info("🔍 Attempting to extract property data from search results table...")
+        
+        # Look for the property in the search results table
+        table_rows = page.eles('xpath://table//tr')
+        logging.info(f"Found {len(table_rows)} table rows")
+        
+        for row in table_rows:
+            try:
+                row_text = row.text
+                if apn in row_text:
+                    logging.info(f"✅ Found property row containing APN {apn}")
+                    
+                    # Extract basic property information from the row
+                    cells = row.eles('xpath://td')
+                    if len(cells) >= 3:  # Ensure we have enough columns
+                        # Try to extract acreage from the row text
+                        acreage_match = re.search(r'(\d+\.?\d*)\s*acres?', row_text, re.IGNORECASE)
+                        acreage = float(acreage_match.group(1)) if acreage_match else None
+                        
+                        # Try to extract estimated value from the row text
+                        value_match = re.search(r'\$(\d{1,3}(?:,\d{3})*)', row_text)
+                        estimated_value = float(value_match.group(1).replace(',', '')) if value_match else None
+                        
+                        if acreage or estimated_value:
+                            logging.info(f"✅ Extracted from search results: acreage={acreage}, value={estimated_value}")
+                            return {
+                                'acreage': acreage,
+                                'estimated_value': estimated_value,
+                                'source': 'search_results_table'
+                            }
+                        
+            except Exception as e:
+                logging.warning(f"Error processing table row: {e}")
+                continue
+                
+        logging.warning("❌ Could not extract property data from search results table")
+        return None
+        
+    except Exception as e:
+        logging.error(f"Error extracting property from search results: {e}")
+        return None
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8000)
