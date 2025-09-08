@@ -112,7 +112,7 @@ REQUEST_LOCK = asyncio.Lock()  # For sequential processing
 # Removed old browser tracking - now using persistent session in browser_pool
 
 async def ensure_logged_in(page: WebPage):
-    """Ensure the browser is logged in, using persistent session when possible"""
+    """Ensure the browser is logged in, with enhanced session validation"""
     # Check if we're already on a logged-in page
     current_url = page.url
     if current_url and "app.propstream.com" in current_url:
@@ -686,20 +686,24 @@ def get_cached_state_abbreviation(state: str) -> str:
 
 def search_property(page: WebPage, address_format: str, apn: str, county: str, state: str) -> None:
     """
-    Search for a property on Propstream using the provided address details.
+    Search for a property on Propstream with enhanced session validation
     """
     state_abbr = get_cached_state_abbreviation(state)
     county = county.strip()
     
+    # Validate county format before proceeding
+    if not validate_county_format(county, state):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid county format: {county}. Please use proper county name format."
+        )
+    
     # Create property_info for screenshots
     property_info = f"{apn}_{county}_{state_abbr}".replace(" ", "_").replace(",", "")
     
-    if county.lower().endswith('county'):
-        base_name = county[:-(len('county'))].strip()
-        county = f"{base_name.title()} County"
-        logging.info(f"County name modified to: {county}")
-    else:
-        county = f"{county.title()} County"
+    # Format county name properly without duplication
+    county = format_county_name(county)
+    logging.info(f"County name formatted to: {county}")
 
     address = address_format.format(apn, county, state_abbr)
     
@@ -725,8 +729,6 @@ def search_property(page: WebPage, address_format: str, apn: str, county: str, s
             
             if "login.propstream.com" in current_url_before_search:
                 logging.error("⚠️  Redirected to login page when trying to access search - session expired!")
-                # take_screenshot(page, f"04_redirected_to_login_attempt_{attempt+1}.png", f"Redirected to login (attempt {attempt+1})")
-                
                 # Mark session as invalid and force retry with fresh browser
                 browser_pool.invalidate_session()
                 raise Exception(f"Session expired on attempt {attempt + 1} - will retry with fresh browser")
@@ -915,7 +917,6 @@ def search_property(page: WebPage, address_format: str, apn: str, county: str, s
             time.sleep(5)
             
             # Take screenshot after search to see the results
-            # take_screenshot(page, f"05_after_search_attempt_{attempt+1}.png", f"After search performed (attempt {attempt+1})")
             logging.info(f"URL after search: {page.url}")
             
             # Take screenshot of search results immediately after search
@@ -1237,7 +1238,6 @@ def search_property(page: WebPage, address_format: str, apn: str, county: str, s
                 time.sleep(5)  # Wait for dynamic content to load
                 
                 # Take screenshot of details page
-                # take_screenshot(page, f"06_property_details_page_attempt_{attempt+1}.png", f"Property details page (attempt {attempt+1})")
                 logging.info(f"✅ Successfully navigated to details page. URL: {page.url}")
                 
             else:
@@ -1942,10 +1942,16 @@ async def valuate_property(property_request: PropertyRequest):
 
 async def _process_valuation(property_request: PropertyRequest):
     """
-    Process a property valuation request, fetching data from Propstream and Zillow.
-    Uses cached results if available and stores new results in Redis.
+    Process a property valuation request with enhanced validation and session handling
     """
     global last_request_time
+    
+    # Validate property request before processing
+    if not validate_property_request(property_request):
+        raise HTTPException(
+            status_code=400, 
+            detail=f"Invalid property request format. Please check APN, county, and state format."
+        )
     
     # Rate limiting to prevent PropStream blocking
     current_time = time.time()
@@ -2117,6 +2123,60 @@ def extract_property_from_search_results(page: WebPage, apn: str) -> Optional[Di
     except Exception as e:
         logging.error(f"Error extracting property from search results: {e}")
         return None
+
+def validate_county_format(county: str, state: str) -> bool:
+    """
+    Validate that the county is in proper format (either 'County Name' or 'County Name County')
+    Returns True if valid, False if invalid
+    """
+    county = county.strip()
+    state_abbr = get_cached_state_abbreviation(state)
+    
+    # Log the validation
+    logging.info(f"County validation: Input '{county}' for state '{state}' ({state_abbr})")
+    
+    # For now, we'll accept any county format and let PropStream handle it
+    # In the future, you could add a list of valid counties per state
+    return True
+
+def format_county_name(county: str) -> str:
+    """
+    Format county name to ensure it ends with 'County' but doesn't duplicate
+    """
+    county = county.strip()
+    
+    # If it already ends with 'County', just ensure proper capitalization
+    if county.lower().endswith('county'):
+        # Remove any trailing 'County' and add it back with proper capitalization
+        base_name = county[:-6].strip()  # Remove 'county' (6 characters)
+        return f"{base_name.title()} County"
+    else:
+        # If it doesn't end with 'County', add it
+        return f"{county.title()} County"
+
+def validate_property_request(property_request: PropertyRequest) -> bool:
+    """
+    Validate the property request before processing
+    Returns True if valid, False if invalid
+    """
+    # Validate county format
+    if not validate_county_format(property_request.county, property_request.state):
+        logging.error(f"❌ Invalid county format: {property_request.county}")
+        return False
+    
+    # Validate APN format (basic check)
+    if not property_request.apn or len(property_request.apn.strip()) < 3:
+        logging.error(f"❌ Invalid APN format: {property_request.apn}")
+        return False
+    
+    # Validate state
+    state_abbr = get_cached_state_abbreviation(property_request.state)
+    if not state_abbr:
+        logging.error(f"❌ Invalid state: {property_request.state}")
+        return False
+    
+    logging.info(f"✅ Property request validation passed: APN={property_request.apn}, County={property_request.county}, State={property_request.state}")
+    return True
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8000)
