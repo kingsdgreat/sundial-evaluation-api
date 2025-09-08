@@ -29,7 +29,7 @@ from pydantic import Field
 
 # Global rate limiting to prevent PropStream blocking
 last_request_time = 0
-MIN_REQUEST_INTERVAL = 120  # 2 minutes between requests to avoid account lockout
+MIN_REQUEST_INTERVAL = 30  # Reduced from 120 to 30 seconds for webhook usage
 
 # Configure logging
 logging.basicConfig(
@@ -1959,7 +1959,7 @@ async def _process_valuation(property_request: PropertyRequest):
     if time_since_last_request < MIN_REQUEST_INTERVAL:
         wait_time = MIN_REQUEST_INTERVAL - time_since_last_request
         # Add random variation to make timing more human-like
-        random_delay = random.uniform(15, 45)  # 15-45 seconds additional random delay
+        random_delay = random.uniform(5, 15)  # Reduced from 15-45 to 5-15 seconds
         total_wait = wait_time + random_delay
         logging.info(f"⏱️  Rate limiting: waiting {total_wait:.1f} seconds before next request")
         await asyncio.sleep(total_wait)
