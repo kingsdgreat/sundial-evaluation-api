@@ -1970,16 +1970,16 @@ async def _process_valuation(property_request: PropertyRequest):
     cache_key = generate_cache_key(property_request)
     
     # Check Redis cache for existing valuation
-    # cached_result = redis_client.get(cache_key)
-    # if cached_result:
-    #     logging.info(f"Cache hit for {cache_key}")
-    #     try:
-    #         cached_data = json.loads(cached_result)
-    #         if 'search_url' not in cached_data:
-    #             cached_data['search_url'] = None
-    #         return ValuationResponse(**cached_data)
-    #     except Exception as e:
-    #         logging.warning(f"Error parsing cached data: {str(e)}. Proceeding with fresh valuation.")
+    cached_result = redis_client.get(cache_key)
+    if cached_result:
+        logging.info(f"Cache hit for {cache_key}")
+        try:
+            cached_data = json.loads(cached_result)
+            if 'search_url' not in cached_data:
+                cached_data['search_url'] = None
+            return ValuationResponse(**cached_data)
+        except Exception as e:
+            logging.warning(f"Error parsing cached data: {str(e)}. Proceeding with fresh valuation.")
     
     # Acquire rate limit slot
     rate_limit_key = f"valuation:{cleaned_apn}"
@@ -2058,15 +2058,15 @@ async def _process_valuation(property_request: PropertyRequest):
             )
 
             # Cache the response in Redis
-            # try:
-            #     redis_client.setex(
-            #         cache_key,
-            #         settings.CACHE_EXPIRATION,
-            #         json.dumps(valuation_response.model_dump())
-            #     )
-            #     logging.info(f"Cached valuation response for {cache_key}")
-            # except Exception as e:
-            #     logging.warning(f"Failed to cache valuation response: {str(e)}")
+            try:
+                redis_client.setex(
+                    cache_key,
+                    settings.CACHE_EXPIRATION,
+                    json.dumps(valuation_response.model_dump())
+                )
+                logging.info(f"Cached valuation response for {cache_key}")
+            except Exception as e:
+                logging.warning(f"Failed to cache valuation response: {str(e)}")
 
             return valuation_response
         except HTTPException:
