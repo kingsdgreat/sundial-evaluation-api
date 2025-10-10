@@ -1,0 +1,14 @@
+[Unit]
+Description=Docker Compose Auto-Restart Service
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/ead8/Downloads/sundialapi/1743534086245-realstate-scrape
+ExecStart=/home/ead8/Downloads/sundialapi/1743534086245-realstate-scrape/restart_services.sh
+User=ead8
+Group=ead8
+
+[Install]
+WantedBy=multi-user.target
