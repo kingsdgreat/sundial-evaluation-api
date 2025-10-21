@@ -16,6 +16,7 @@ import redis
 import json
 import hashlib
 import os
+import subprocess
 
 from bs4 import BeautifulSoup
 from DrissionPage import ChromiumOptions, WebPage
@@ -29,7 +30,8 @@ from pydantic import Field
 
 # Global rate limiting to prevent PropStream blocking
 last_request_time = 0
-MIN_REQUEST_INTERVAL = 30  # Reduced from 120 to 30 seconds for webhook usage
+MIN_REQUEST_INTERVAL = 0.5  # Reduced from 1 to 0.5 seconds  
+
 
 # Configure logging
 logging.basicConfig(
@@ -42,10 +44,10 @@ ADDRESS_FORMAT = "APN# {0}, {1}, {2}"
 EMAIL = "kingsdgreatest@gmail.com"
 PASSWORD = "Kanayo147*"
 MILES_TO_DEGREES = 1.0 / 69
-INITIAL_SEARCH_RADIUS_MILES = 1.0
-MAX_SEARCH_RADIUS_MILES = 10.0
-SEARCH_RADIUS_INCREMENT = 0.5
-MIN_COMPARABLE_PROPERTIES = 5
+INITIAL_SEARCH_RADIUS_MILES = 2.0  # Increased from 1.0 to 2.0 for faster results
+MAX_SEARCH_RADIUS_MILES = 6.0  # Reduced from 10.0 to 6.0 for faster processing
+SEARCH_RADIUS_INCREMENT = 2.0  
+MIN_COMPARABLE_PROPERTIES = 2 
 MIN_ACREAGE_RATIO = 0.2
 MAX_ACREAGE_RATIO = 5.0
 PRICE_THRESHOLD = 100000
@@ -247,8 +249,8 @@ def login_to_propstream(page: WebPage, email: str, password: str) -> None:
         
         # Wait for document ready
         page.wait.load_start()
-        page.wait.doc_loaded(timeout=20)
-        time.sleep(5)  # Increased wait time to avoid rate limiting
+        page.wait.doc_loaded(timeout=10)
+        time.sleep(2)  # Reduced from 5 to 2 seconds
         
         # Take screenshot of login page
         # take_screenshot(page, "01_login_page.png", "Login page loaded")
@@ -382,15 +384,15 @@ def login_to_propstream(page: WebPage, email: str, password: str) -> None:
                     raise Exception("Login button not found")
                 
                 # Wait for navigation
-                page.wait.doc_loaded(timeout=20)
-                time.sleep(random.uniform(5.0, 8.0))  # Longer human-like delay after login
+                page.wait.doc_loaded(timeout=10)
+                time.sleep(random.uniform(2.0, 4.0))  # Reduced from 5-8 to 2-4 seconds
                 
                 # Handle any browser dialogs/alerts that might be blocking
                 logging.info("=== HANDLING BROWSER DIALOGS ===")
                 dialog_handled = False
                 
-                # Add extra delay to prevent rate limiting
-                time.sleep(5)
+                # Add minimal delay to prevent rate limiting
+                time.sleep(2)  # Reduced from 5 to 2 seconds
                 
                 # Handle session conflict popups specifically
                 try:
@@ -594,9 +596,9 @@ def login_to_propstream(page: WebPage, email: str, password: str) -> None:
                     # Take screenshot of successful login destination
                     # take_screenshot(page, f"03c_successful_login_attempt_{attempt}.png", f"Successful login destination (attempt {attempt})")
                     
-                    # Add delay after successful login to avoid detection
-                    delay = random.uniform(10.0, 20.0)
-                    logging.info(f"⏱️  Adding {delay:.1f}s delay after successful login to avoid detection")
+                    # Add minimal delay after successful login
+                    delay = random.uniform(3.0, 6.0)  # Reduced from 10-20 to 3-6 seconds
+                    logging.info(f"⏱️  Adding {delay:.1f}s delay after successful login")
                     time.sleep(delay)
                     
                 break
@@ -707,8 +709,8 @@ def search_property(page: WebPage, address_format: str, apn: str, county: str, s
 
     address = address_format.format(apn, county, state_abbr)
     
-    max_retries = 3
-    retry_delay = 7  # Increased from 5 to 7 seconds
+    max_retries = 2  # Reduced from 3 to 2
+    retry_delay = 3  # Reduced from 7 to 3 seconds
     
     for attempt in range(max_retries):
         try:
@@ -720,8 +722,8 @@ def search_property(page: WebPage, address_format: str, apn: str, county: str, s
             logging.info("Navigated to search page")
             
             # Wait for document and dynamic content to load
-            page.wait.doc_loaded(timeout=20)
-            time.sleep(5)  # Wait for dynamic content
+            page.wait.doc_loaded(timeout=10)
+            time.sleep(2)  # Reduced from 5 to 2 seconds
             
             # Check if we got redirected back to login immediately
             current_url_before_search = page.url
@@ -755,7 +757,7 @@ def search_property(page: WebPage, address_format: str, apn: str, county: str, s
                 logging.warning("⚠️ Page still loading after 60 seconds")
 
             # Additional wait for JavaScript to initialize
-            time.sleep(10)
+            time.sleep(3)  # Reduced from 10 to 3 seconds
 
             # Check if page is still loading
             if page.title == "Loading...":
@@ -789,7 +791,7 @@ def search_property(page: WebPage, address_format: str, apn: str, county: str, s
             logging.info("Address entered in search")
             
             # Wait for dropdown suggestions to appear
-            time.sleep(3)
+            time.sleep(1)  # Reduced from 3 to 1 second
             
             # Look for dropdown suggestion that matches our APN
             logging.info("🔍 Looking for dropdown suggestion...")
@@ -847,7 +849,7 @@ def search_property(page: WebPage, address_format: str, apn: str, county: str, s
                         search_button.click()
                         logging.info("🎯 Search button clicked!")
                         search_button_clicked = True
-                        time.sleep(3)  # Wait after clicking search
+                        time.sleep(1)  # Reduced from 3 to 1 second
                         break
                 except Exception as e:
                     logging.info(f"❌ Search button selector {i+1} failed: {e}")
@@ -857,12 +859,12 @@ def search_property(page: WebPage, address_format: str, apn: str, county: str, s
                 logging.info("No explicit Search button found - relying on dropdown selection or Enter key")
             
             # Wait for search results to load and the page to update with results
-            page.wait.doc_loaded(timeout=20)
-            time.sleep(5)  # Initial wait for search results
+            page.wait.doc_loaded(timeout=10)
+            time.sleep(2)  # Reduced from 5 to 2 seconds
             
             # Wait for the search page to be updated with search results
             logging.info("=== WAITING FOR SEARCH PAGE TO UPDATE WITH RESULTS ===")
-            max_wait_attempts = 15  # Increased wait attempts
+            max_wait_attempts = 8  # Reduced from 15 to 8 attempts
             search_results_loaded = False
             
             for wait_attempt in range(max_wait_attempts):
@@ -907,14 +909,14 @@ def search_property(page: WebPage, address_format: str, apn: str, county: str, s
                     logging.info("✅ Search results have been loaded on the page!")
                     break
                 
-                logging.info(f"Page not yet updated with results, waiting 3 more seconds...")
-                time.sleep(3)
+                logging.info(f"Page not yet updated with results, waiting 2 more seconds...")
+                time.sleep(2)  # Reduced from 3 to 2 seconds
             
             if not search_results_loaded:
                 logging.warning("⚠️ Search results may not have loaded properly after maximum wait time")
             
             # Wait a bit more to ensure all dynamic content is loaded
-            time.sleep(5)
+            time.sleep(2)  # Reduced from 5 to 2 seconds
             
             # Take screenshot after search to see the results
             logging.info(f"URL after search: {page.url}")
@@ -1075,12 +1077,12 @@ def search_property(page: WebPage, address_format: str, apn: str, county: str, s
             
             # Retry loop to wait for Details buttons to appear
             details_found = False
-            max_details_wait = 12  # Try for up to 60 seconds
+            max_details_wait = 6  # Reduced from 12 to 6 attempts (30 seconds max)
             for details_wait in range(max_details_wait):
                 # Take screenshot during loading/waiting phase
                 if details_wait == 0:  # First attempt
                     take_screenshot(page, "02_loading_waiting.png", "Loading/waiting for Details buttons", property_info)
-                time.sleep(5)  # Wait 5 seconds each iteration
+                time.sleep(3)  # Reduced from 5 to 3 seconds each iteration
                 
                 # Scroll to ensure all elements are visible
                 try:
@@ -1229,22 +1231,32 @@ def search_property(page: WebPage, address_format: str, apn: str, county: str, s
                     except Exception as e:
                         logging.warning(f"Could not find alternative clickable elements: {e}")
             
-            if details_anchor:
-                logging.info("🎯 Clicking Details anchor to navigate to property details page...")
-                details_anchor.click()
-                
-                # Wait for the details page to load
-                page.wait.doc_loaded(timeout=20)
-                time.sleep(5)  # Wait for dynamic content to load
-                
-                # Take screenshot of details page
-                logging.info(f"✅ Successfully navigated to details page. URL: {page.url}")
-                
+            # ALWAYS try sidebar extraction first - this is the fastest method
+            logging.info("🔍 Attempting sidebar extraction (primary method)...")
+            sidebar_data = extract_property_from_sidebar(page, apn)
+            
+            if sidebar_data and sidebar_data.get('acreage'):
+                logging.info("✅ Successfully extracted property data from sidebar - skipping details page navigation")
+                logging.info(f"📊 Sidebar data: {sidebar_data}")
+                # Don't navigate to details page if we have the data we need
+                return
             else:
-                logging.error("❌ No Details anchor found - forcing session refresh and retry")
-                # Force session refresh when no Details buttons are found
-                browser_pool.invalidate_session()
-                raise Exception(f"No Details buttons found on attempt {attempt + 1} - forcing session refresh")
+                logging.info("⚠️ Sidebar extraction failed - trying details page as fallback...")
+                if details_anchor:
+                    logging.info("🎯 Clicking Details anchor to navigate to property details page...")
+                    details_anchor.click()
+                    
+                    # Wait for the details page to load
+                    page.wait.doc_loaded(timeout=10)
+                    time.sleep(2)  # Reduced from 5 to 2 seconds
+                    
+                    # Take screenshot of details page
+                    logging.info(f"✅ Successfully navigated to details page. URL: {page.url}")
+                else:
+                    logging.error("❌ No Details anchor found - forcing session refresh and retry")
+                    # Force session refresh when no Details buttons are found
+                    browser_pool.invalidate_session()
+                    raise Exception(f"No Details buttons found on attempt {attempt + 1} - forcing session refresh")
             
             # Property search and navigation completed - ready for data extraction
             logging.info("🎯 Property search and navigation completed - ready for data extraction")
@@ -1658,7 +1670,7 @@ def fetch_zillow_data(page: WebPage, north: float, south: float, east: float, we
     potential_homes = []
     current_page = 1
     total_pages = None
-    max_pages = 2  # Cap pages to reduce latency/timeout risk
+    max_pages = 1  # Reduced from 2 to 1 page for faster processing
     
     base_search_url = get_url_for_page()
     
@@ -1718,7 +1730,7 @@ def fetch_zillow_data(page: WebPage, north: float, south: float, east: float, we
 
             current_page += 1
             if current_page <= total_pages and current_page <= max_pages:
-                time.sleep(3)
+                time.sleep(1)  # Reduced from 3 to 1 second
 
         except Exception as e:
             logging.error(f"Error fetching data from Zillow API on page {current_page}: {e}")
@@ -1910,7 +1922,7 @@ def find_comparable_properties(
                 filtered_homes.append(prop)
                 logging.info(f"Added property with price from history: {prop['address']}")
             
-            time.sleep(random.uniform(3, 5))
+            time.sleep(random.uniform(1, 2))  # Reduced from 3-5 to 1-2 seconds
 
     valid_properties, outlier_properties = detect_outliers_iqr(filtered_homes)
 
@@ -1958,8 +1970,8 @@ async def _process_valuation(property_request: PropertyRequest):
     time_since_last_request = current_time - last_request_time
     if time_since_last_request < MIN_REQUEST_INTERVAL:
         wait_time = MIN_REQUEST_INTERVAL - time_since_last_request
-        # Add random variation to make timing more human-like
-        random_delay = random.uniform(5, 15)  # Reduced from 15-45 to 5-15 seconds
+        # Add minimal random variation for faster processing
+        random_delay = random.uniform(1, 3)  # Reduced from 5-15 to 1-3 seconds
         total_wait = wait_time + random_delay
         logging.info(f"⏱️  Rate limiting: waiting {total_wait:.1f} seconds before next request")
         await asyncio.sleep(total_wait)
@@ -2002,12 +2014,21 @@ async def _process_valuation(property_request: PropertyRequest):
             )
             logging.info("Property search completed")
 
-            # Extract property information
+            # Try to extract property information from sidebar first (faster, no navigation needed)
+            logging.info("🔍 Attempting to extract property data from sidebar...")
             target_property_info = await asyncio.get_event_loop().run_in_executor(
-                None, extract_property_info, page
+                None, extract_property_from_sidebar, page, cleaned_apn
             )
+            
+            # If sidebar extraction failed, fall back to details page extraction
             if not target_property_info:
-                logging.error("Failed to extract target property info")
+                logging.info("⚠️ Sidebar extraction failed, falling back to details page extraction...")
+                target_property_info = await asyncio.get_event_loop().run_in_executor(
+                    None, extract_property_info, page
+                )
+            
+            if not target_property_info:
+                logging.error("Failed to extract target property info from both sidebar and details page")
                 raise HTTPException(status_code=500, detail="Failed to extract target property information")
             
             # Browser cleanup will be handled by the browser pool automatically
@@ -2078,6 +2099,118 @@ async def _process_valuation(property_request: PropertyRequest):
         finally:
             # Release rate limit slot
             await api_rate_limiter.release(rate_limit_key)
+
+def extract_property_from_sidebar(page: WebPage, apn: str) -> Optional[Dict]:
+    """Extract property data directly from the right sidebar on search results page"""
+    try:
+        logging.info("🔍 Attempting to extract property data from right sidebar...")
+        
+        # Get the page HTML for parsing
+        html = page.html
+        soup = BeautifulSoup(html, "html.parser")
+        
+        # Look for the lot size in the sidebar based on the HTML structure you provided
+        # The structure is: <span class="src-app-Search-Property-style__Nh01s__iconCounts">5,750<span>LOT</span></span>
+        
+        # Method 1: Look for the specific class structure for lot size
+        lot_size_elements = soup.find_all("span", class_=lambda x: x and "iconCounts" in x)
+        logging.info(f"Found {len(lot_size_elements)} iconCounts elements")
+        
+        for element in lot_size_elements:
+            element_text = element.get_text().strip()
+            logging.info(f"📋 Checking iconCounts element: '{element_text}'")
+            
+            # Check if this element contains lot size information
+            if "LOT" in element_text.upper():
+                # Extract the numeric value (e.g., "5,750" from "5,750LOT")
+                lot_match = re.search(r'([\d,]+)', element_text)
+                if lot_match:
+                    try:
+                        lot_size_str = lot_match.group(1).replace(',', '')
+                        lot_size_sqft = float(lot_size_str)
+                        
+                        # Convert square feet to acres (1 acre = 43,560 sq ft)
+                        lot_acres = lot_size_sqft / 43560
+                        
+                        logging.info(f"🏡 Found lot size in sidebar: {lot_size_sqft} sq ft ({lot_acres:.2f} acres)")
+                        
+                        # Also look for estimated value in the sidebar
+                        estimated_value = None
+                        
+                        # Look for AVG.COMPS value in the sidebar
+                        # Based on your HTML: <div class="src-app-Search-Property-style__Er7lN__value">$3,354,512</div>
+                        value_elements = soup.find_all("div", class_=lambda x: x and "Er7lN__value" in x)
+                        for value_elem in value_elements:
+                            value_text = value_elem.get_text().strip()
+                            if value_text.startswith('$'):
+                                # Check if this is the AVG.COMPS value by looking at the parent structure
+                                parent = value_elem.parent
+                                if parent:
+                                    parent_text = parent.get_text().strip()
+                                    if "AVG.COMPS" in parent_text.upper():
+                                        value_match = re.search(r'\$([\d,]+)', value_text)
+                                        if value_match:
+                                            try:
+                                                estimated_value = float(value_match.group(1).replace(',', ''))
+                                                logging.info(f"💰 Found AVG.COMPS value in sidebar: ${estimated_value:,.2f}")
+                                                break
+                                            except ValueError:
+                                                continue
+                        
+                        return {
+                            'acreage': lot_acres,
+                            'lot_size_sqft': lot_size_sqft,
+                            'estimated_value': estimated_value,
+                            'source': 'search_sidebar'
+                        }
+                        
+                    except ValueError as e:
+                        logging.warning(f"Could not convert lot size value: {e}")
+                        continue
+        
+        # Method 2: Look for lot size using more generic patterns
+        logging.info("🔍 Trying generic lot size patterns in sidebar...")
+        
+        # Look for any text containing lot size information
+        all_text_elements = soup.find_all(["div", "span", "p"])
+        for element in all_text_elements:
+            text = element.get_text().strip()
+            
+            # Look for patterns like "5,750 LOT" or "217,800 LOT"
+            lot_patterns = [
+                r'([\d,]+)\s*LOT',
+                r'LOT\s*([\d,]+)',
+                r'([\d,]+)\s*SqFt',
+                r'([\d,]+)\s*Sq\.?\s*Ft\.?'
+            ]
+            
+            for pattern in lot_patterns:
+                lot_match = re.search(pattern, text, re.IGNORECASE)
+                if lot_match:
+                    try:
+                        lot_size_str = lot_match.group(1).replace(',', '')
+                        lot_size_sqft = float(lot_size_str)
+                        
+                        # Only accept reasonable lot sizes (between 1,000 and 1,000,000 sq ft)
+                        if 1000 <= lot_size_sqft <= 1000000:
+                            lot_acres = lot_size_sqft / 43560
+                            logging.info(f"🏡 Found lot size with generic pattern: {lot_size_sqft} sq ft ({lot_acres:.2f} acres)")
+                            
+                            return {
+                                'acreage': lot_acres,
+                                'lot_size_sqft': lot_size_sqft,
+                                'estimated_value': None,
+                                'source': 'search_sidebar_generic'
+                            }
+                    except ValueError:
+                        continue
+        
+        logging.warning("❌ Could not extract property data from sidebar")
+        return None
+        
+    except Exception as e:
+        logging.error(f"Error extracting property from sidebar: {e}")
+        return None
 
 def extract_property_from_search_results(page: WebPage, apn: str) -> Optional[Dict]:
     """Extract property data directly from search results table when Details buttons don't exist"""

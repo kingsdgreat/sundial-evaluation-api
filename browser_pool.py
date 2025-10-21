@@ -11,7 +11,7 @@ class BrowserPool:
         self.persistent_browser: Optional[WebPage] = None
         self.session_valid = False
         self.session_created_at = None
-        self.max_session_age = 3600  # 1 hour max session age
+        self.max_session_age = 300  # 5 minutes max session age for ultra-fast performance
         self.lock = asyncio.Lock()
         
     async def initialize(self):
@@ -29,15 +29,33 @@ class BrowserPool:
         co = ChromiumOptions()
         co.headless(True)
         
-        # Anti-detection measures
+        # Ultra-fast performance mode
         co.set_argument('--no-sandbox')
         co.set_argument('--disable-dev-shm-usage')
         co.set_argument('--disable-gpu')
-        co.set_argument('--single-process')
         co.set_argument('--disable-extensions')
         co.set_argument('--disable-plugins')
         co.set_argument('--disable-images')  # Faster loading
-        co.set_argument('--remote-debugging-port=0')  # Auto-assign port
+        co.set_argument('--disable-web-security')
+        co.set_argument('--disable-features=VizDisplayCompositor')
+        co.set_argument('--disable-background-timer-throttling')
+        co.set_argument('--disable-backgrounding-occluded-windows')
+        co.set_argument('--disable-renderer-backgrounding')
+        co.set_argument('--remote-debugging-port=0')
+        co.set_argument('--disable-logging')
+        co.set_argument('--disable-default-apps')
+        co.set_argument('--disable-sync')
+        co.set_argument('--disable-translate')
+        co.set_argument('--hide-scrollbars')
+        co.set_argument('--mute-audio')
+        co.set_argument('--no-first-run')
+        co.set_argument('--disable-background-networking')
+        co.set_argument('--disable-component-update')
+        co.set_argument('--disable-domain-reliability')
+        co.set_argument('--disable-features=TranslateUI')
+        co.set_argument('--disable-ipc-flooding-protection')
+        co.set_argument('--aggressive-cache-discard')
+        co.set_argument('--memory-pressure-off')
         
         # Stealth mode - make browser look more human
         co.set_argument('--disable-blink-features=AutomationControlled')
@@ -58,12 +76,12 @@ class BrowserPool:
         # Additional randomization
         co.set_argument(f'--window-size={random.randint(1200, 1920)},{random.randint(800, 1080)}')
         
-        # Create browser with timeout handling
+        # Create browser with ultra-fast timeout handling
         try:
-            browser = WebPage(chromium_options=co, timeout=30)
+            browser = WebPage(chromium_options=co, timeout=8)  # Ultra-fast: 8s timeout
             
-            # Set timeouts
-            browser.set.timeouts(base=20, page_load=30, script=20)
+            # Set ultra-fast timeouts
+            browser.set.timeouts(base=5, page_load=8, script=5)
             
             # Apply stealth measures
             try:
@@ -152,6 +170,14 @@ class BrowserPool:
         self.session_valid = False
         self.session_created_at = None
         logging.info("❌ Browser session marked as invalid")
+        
+        # Trigger Docker restart for fresh browser instance
+        try:
+            from docker_restart import restart_docker_services
+            logging.info("🔄 Triggering Docker restart for fresh browser session...")
+            restart_docker_services()
+        except Exception as e:
+            logging.error(f"❌ Failed to restart Docker services: {e}")
     
     async def cleanup(self):
         """Cleanup browser"""
