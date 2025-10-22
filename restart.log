@@ -28,3 +28,88 @@ redis-1  | 1:M 10 Oct 2025 10:07:51.095 * Running mode=standalone, port=6379.
 redis-1  | 1:M 10 Oct 2025 10:07:51.096 * Server initialized
 redis-1  | 1:M 10 Oct 2025 10:07:51.098 * Ready to accept connections tcp
 [2025-10-10 13:07:52] Docker Compose restart process completed successfully
+[2025-10-21 18:00:01] Starting Docker Compose restart process...
+[2025-10-21 18:00:01] Stopping and removing containers, networks, and volumes...
+[2025-10-21 18:00:16] Successfully stopped and removed containers and volumes
+[2025-10-21 18:00:21] Rebuilding and starting services...
+[2025-10-21 18:00:24] Successfully rebuilt and started services
+[2025-10-21 18:00:24] Current running containers:
+NAME                                     IMAGE                                COMMAND                  SERVICE   CREATED        STATUS                  PORTS
+1743534086245-realstate-scrape-app-1     1743534086245-realstate-scrape-app   "./start.sh"             app       1 second ago   Up Less than a second   8000/tcp
+1743534086245-realstate-scrape-nginx-1   nginx:alpine                         "/docker-entrypoint.…"   nginx     1 second ago   Up Less than a second   0.0.0.0:8000->80/tcp, [::]:8000->80/tcp
+1743534086245-realstate-scrape-redis-1   redis:7-alpine                       "docker-entrypoint.s…"   redis     1 second ago   Up 1 second             0.0.0.0:6380->6379/tcp, [::]:6380->6379/tcp
+[2025-10-21 18:00:24] Recent logs from services:
+app-1  | Starting Xvfb on display :285
+redis-1  | 1:C 21 Oct 2025 15:00:23.933 # WARNING Memory overcommit must be enabled! Without it, a background save or replication may fail under low memory condition. Being disabled, it can also cause failures without low memory condition, see https://github.com/jemalloc/jemalloc/issues/1328. To fix this issue add 'vm.overcommit_memory = 1' to /etc/sysctl.conf and then reboot or run the command 'sysctl vm.overcommit_memory=1' for this to take effect.
+redis-1  | 1:C 21 Oct 2025 15:00:23.935 * oO0OoO0OoO0Oo Redis is starting oO0OoO0OoO0Oo
+redis-1  | 1:C 21 Oct 2025 15:00:23.935 * Redis version=7.4.5, bits=64, commit=00000000, modified=0, pid=1, just started
+redis-1  | 1:C 21 Oct 2025 15:00:23.935 # Warning: no config file specified, using the default config. In order to specify a config file use redis-server /path/to/redis.conf
+redis-1  | 1:M 21 Oct 2025 15:00:23.936 * monotonic clock: POSIX clock_gettime
+redis-1  | 1:M 21 Oct 2025 15:00:23.939 * Running mode=standalone, port=6379.
+redis-1  | 1:M 21 Oct 2025 15:00:23.940 * Server initialized
+redis-1  | 1:M 21 Oct 2025 15:00:23.940 * Ready to accept connections tcp
+nginx-1  | /docker-entrypoint.sh: /docker-entrypoint.d/ is not empty, will attempt to perform configuration
+nginx-1  | /docker-entrypoint.sh: Looking for shell scripts in /docker-entrypoint.d/
+nginx-1  | /docker-entrypoint.sh: Launching /docker-entrypoint.d/10-listen-on-ipv6-by-default.sh
+nginx-1  | 10-listen-on-ipv6-by-default.sh: info: Getting the checksum of /etc/nginx/conf.d/default.conf
+[2025-10-21 18:00:24] Docker Compose restart process completed successfully
+[2025-10-22 06:00:01] Starting Docker Compose restart process...
+[2025-10-22 06:00:01] Stopping and removing containers, networks, and volumes...
+[2025-10-22 06:00:15] Successfully stopped and removed containers and volumes
+[2025-10-22 06:00:20] Rebuilding and starting services...
+[2025-10-22 06:00:25] Successfully rebuilt and started services
+[2025-10-22 06:00:25] Current running containers:
+NAME                                     IMAGE                                COMMAND                  SERVICE   CREATED         STATUS                  PORTS
+1743534086245-realstate-scrape-app-1     1743534086245-realstate-scrape-app   "./start.sh"             app       2 seconds ago   Up Less than a second   8000/tcp
+1743534086245-realstate-scrape-nginx-1   nginx:alpine                         "/docker-entrypoint.…"   nginx     2 seconds ago   Up Less than a second   0.0.0.0:8000->80/tcp, [::]:8000->80/tcp
+1743534086245-realstate-scrape-redis-1   redis:7-alpine                       "docker-entrypoint.s…"   redis     2 seconds ago   Up 1 second             0.0.0.0:6380->6379/tcp, [::]:6380->6379/tcp
+[2025-10-22 06:00:25] Recent logs from services:
+nginx-1  | /docker-entrypoint.sh: /docker-entrypoint.d/ is not empty, will attempt to perform configuration
+nginx-1  | /docker-entrypoint.sh: Looking for shell scripts in /docker-entrypoint.d/
+nginx-1  | /docker-entrypoint.sh: Launching /docker-entrypoint.d/10-listen-on-ipv6-by-default.sh
+nginx-1  | 10-listen-on-ipv6-by-default.sh: info: Getting the checksum of /etc/nginx/conf.d/default.conf
+nginx-1  | 10-listen-on-ipv6-by-default.sh: info: Enabled listen on IPv6 in /etc/nginx/conf.d/default.conf
+nginx-1  | /docker-entrypoint.sh: Sourcing /docker-entrypoint.d/15-local-resolvers.envsh
+nginx-1  | /docker-entrypoint.sh: Launching /docker-entrypoint.d/20-envsubst-on-templates.sh
+nginx-1  | /docker-entrypoint.sh: Launching /docker-entrypoint.d/30-tune-worker-processes.sh
+nginx-1  | /docker-entrypoint.sh: Configuration complete; ready for start up
+redis-1  | 1:C 22 Oct 2025 03:00:25.098 # WARNING Memory overcommit must be enabled! Without it, a background save or replication may fail under low memory condition. Being disabled, it can also cause failures without low memory condition, see https://github.com/jemalloc/jemalloc/issues/1328. To fix this issue add 'vm.overcommit_memory = 1' to /etc/sysctl.conf and then reboot or run the command 'sysctl vm.overcommit_memory=1' for this to take effect.
+redis-1  | 1:C 22 Oct 2025 03:00:25.099 * oO0OoO0OoO0Oo Redis is starting oO0OoO0OoO0Oo
+redis-1  | 1:C 22 Oct 2025 03:00:25.099 * Redis version=7.4.5, bits=64, commit=00000000, modified=0, pid=1, just started
+redis-1  | 1:C 22 Oct 2025 03:00:25.099 # Warning: no config file specified, using the default config. In order to specify a config file use redis-server /path/to/redis.conf
+app-1    | Starting Xvfb on display :185
+redis-1  | 1:M 22 Oct 2025 03:00:25.099 * monotonic clock: POSIX clock_gettime
+redis-1  | 1:M 22 Oct 2025 03:00:25.106 * Running mode=standalone, port=6379.
+redis-1  | 1:M 22 Oct 2025 03:00:25.106 * Server initialized
+redis-1  | 1:M 22 Oct 2025 03:00:25.106 * Ready to accept connections tcp
+[2025-10-22 06:00:25] Docker Compose restart process completed successfully
+[2025-10-22 12:00:01] Starting Docker Compose restart process...
+[2025-10-22 12:00:01] Stopping and removing containers, networks, and volumes...
+[2025-10-22 12:00:16] Successfully stopped and removed containers and volumes
+[2025-10-22 12:00:21] Rebuilding and starting services...
+[2025-10-22 12:00:31] Successfully rebuilt and started services
+[2025-10-22 12:00:31] Current running containers:
+NAME                                     IMAGE                                COMMAND                  SERVICE   CREATED         STATUS         PORTS
+1743534086245-realstate-scrape-app-1     1743534086245-realstate-scrape-app   "./start.sh"             app       8 seconds ago   Up 5 seconds   8000/tcp
+1743534086245-realstate-scrape-nginx-1   nginx:alpine                         "/docker-entrypoint.…"   nginx     7 seconds ago   Up 4 seconds   0.0.0.0:8000->80/tcp, [::]:8000->80/tcp
+1743534086245-realstate-scrape-redis-1   redis:7-alpine                       "docker-entrypoint.s…"   redis     9 seconds ago   Up 6 seconds   0.0.0.0:6380->6379/tcp, [::]:6380->6379/tcp
+[2025-10-22 12:00:34] Recent logs from services:
+nginx-1  | /docker-entrypoint.sh: /docker-entrypoint.d/ is not empty, will attempt to perform configuration
+nginx-1  | /docker-entrypoint.sh: Looking for shell scripts in /docker-entrypoint.d/
+nginx-1  | /docker-entrypoint.sh: Launching /docker-entrypoint.d/10-listen-on-ipv6-by-default.sh
+nginx-1  | 10-listen-on-ipv6-by-default.sh: info: Getting the checksum of /etc/nginx/conf.d/default.conf
+nginx-1  | 10-listen-on-ipv6-by-default.sh: info: Enabled listen on IPv6 in /etc/nginx/conf.d/default.conf
+nginx-1  | /docker-entrypoint.sh: Sourcing /docker-entrypoint.d/15-local-resolvers.envsh
+nginx-1  | /docker-entrypoint.sh: Launching /docker-entrypoint.d/20-envsubst-on-templates.sh
+nginx-1  | /docker-entrypoint.sh: Launching /docker-entrypoint.d/30-tune-worker-processes.sh
+nginx-1  | /docker-entrypoint.sh: Configuration complete; ready for start up
+redis-1  | 1:C 22 Oct 2025 09:00:28.408 # WARNING Memory overcommit must be enabled! Without it, a background save or replication may fail under low memory condition. Being disabled, it can also cause failures without low memory condition, see https://github.com/jemalloc/jemalloc/issues/1328. To fix this issue add 'vm.overcommit_memory = 1' to /etc/sysctl.conf and then reboot or run the command 'sysctl vm.overcommit_memory=1' for this to take effect.
+redis-1  | 1:C 22 Oct 2025 09:00:28.410 * oO0OoO0OoO0Oo Redis is starting oO0OoO0OoO0Oo
+redis-1  | 1:C 22 Oct 2025 09:00:28.410 * Redis version=7.4.5, bits=64, commit=00000000, modified=0, pid=1, just started
+redis-1  | 1:C 22 Oct 2025 09:00:28.410 # Warning: no config file specified, using the default config. In order to specify a config file use redis-server /path/to/redis.conf
+redis-1  | 1:M 22 Oct 2025 09:00:28.413 * monotonic clock: POSIX clock_gettime
+app-1    | Starting Xvfb on display :113
+redis-1  | 1:M 22 Oct 2025 09:00:28.417 * Running mode=standalone, port=6379.
+redis-1  | 1:M 22 Oct 2025 09:00:28.418 * Server initialized
+redis-1  | 1:M 22 Oct 2025 09:00:28.420 * Ready to accept connections tcp
+[2025-10-22 12:00:34] Docker Compose restart process completed successfully

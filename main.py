@@ -17,6 +17,9 @@ import json
 import hashlib
 import os
 import subprocess
+import concurrent.futures
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import threading
 
 from bs4 import BeautifulSoup
 from DrissionPage import ChromiumOptions, WebPage
@@ -30,7 +33,7 @@ from pydantic import Field
 
 # Global rate limiting to prevent PropStream blocking
 last_request_time = 0
-MIN_REQUEST_INTERVAL = 0.5  # Reduced from 1 to 0.5 seconds  
+MIN_REQUEST_INTERVAL = 0.3  # Optimized: 0.3 seconds for speed and reliability  
 
 
 # Configure logging
@@ -44,10 +47,10 @@ ADDRESS_FORMAT = "APN# {0}, {1}, {2}"
 EMAIL = "kingsdgreatest@gmail.com"
 PASSWORD = "Kanayo147*"
 MILES_TO_DEGREES = 1.0 / 69
-INITIAL_SEARCH_RADIUS_MILES = 2.0  # Increased from 1.0 to 2.0 for faster results
-MAX_SEARCH_RADIUS_MILES = 6.0  # Reduced from 10.0 to 6.0 for faster processing
-SEARCH_RADIUS_INCREMENT = 2.0  
-MIN_COMPARABLE_PROPERTIES = 2 
+INITIAL_SEARCH_RADIUS_MILES = 3.0  # Start with 3 miles for faster results
+MAX_SEARCH_RADIUS_MILES = 10.0  # Reduced to 8 miles for speed while maintaining good coverage
+SEARCH_RADIUS_INCREMENT = 1.0  # Smaller increment for faster convergence  
+MIN_COMPARABLE_PROPERTIES = 3  # Need at least 3 for good average 
 MIN_ACREAGE_RATIO = 0.2
 MAX_ACREAGE_RATIO = 5.0
 PRICE_THRESHOLD = 100000
@@ -223,24 +226,9 @@ def get_state_abbreviation(state: str) -> str:
     return abbr
 
 def take_screenshot(page: WebPage, filename: str, description: str = "", property_info: str = "") -> None:
-    """Take a screenshot for debugging purposes"""
-    try:
-        # Create screenshots directory if it doesn't exist
-        import os
-        os.makedirs("./screenshots", exist_ok=True)
-        
-        # Add property info to filename if provided
-        if property_info:
-            base_name = os.path.splitext(filename)[0]
-            ext = os.path.splitext(filename)[1]
-            filename = f"{base_name}_{property_info}{ext}"
-        
-        # Save to screenshots directory
-        screenshot_path = f"./screenshots/{filename}"
-        page.get_screenshot(path=screenshot_path)
-        logging.info(f"📸 Screenshot saved: {screenshot_path} - {description}")
-    except Exception as e:
-        logging.warning(f"Could not take screenshot {filename}: {e}")
+    """Take a screenshot for debugging purposes - DISABLED FOR SPEED"""
+    # Screenshots disabled for maximum performance
+    return
 
 def login_to_propstream(page: WebPage, email: str, password: str) -> None:
     try:
@@ -249,8 +237,8 @@ def login_to_propstream(page: WebPage, email: str, password: str) -> None:
         
         # Wait for document ready
         page.wait.load_start()
-        page.wait.doc_loaded(timeout=10)
-        time.sleep(2)  # Reduced from 5 to 2 seconds
+        page.wait.doc_loaded(timeout=5)
+        time.sleep(0.5)  # Minimal wait for maximum speed
         
         # Take screenshot of login page
         # take_screenshot(page, "01_login_page.png", "Login page loaded")
@@ -317,13 +305,23 @@ def login_to_propstream(page: WebPage, email: str, password: str) -> None:
         max_attempts = 3
         for attempt in range(1, max_attempts + 1):
             try:
-                username_el = page.ele("@name=username", timeout=10)
+                # Wait for page to fully load before looking for inputs
+                time.sleep(3)
+                
+                username_el = page.ele("@name=username", timeout=15)
                 if not username_el:
-                    username_el = page.ele('xpath://input[@type="email" or @name="username" or contains(@placeholder, "Email") or contains(@placeholder, "username")]', timeout=10)
-                password_el = page.ele("@name=password", timeout=10)
+                    username_el = page.ele('xpath://input[@type="email" or @name="username" or contains(@placeholder, "Email") or contains(@placeholder, "username")]', timeout=15)
+                if not username_el:
+                    username_el = page.ele('xpath://input[contains(@class, "email") or contains(@class, "username")]', timeout=15)
+                    
+                password_el = page.ele("@name=password", timeout=15)
                 if not password_el:
-                    password_el = page.ele('xpath://input[@type="password" or @name="password" or contains(@placeholder, "Password")]', timeout=10)
+                    password_el = page.ele('xpath://input[@type="password" or @name="password" or contains(@placeholder, "Password")]', timeout=15)
+                if not password_el:
+                    password_el = page.ele('xpath://input[contains(@class, "password")]', timeout=15)
+                    
                 if not username_el or not password_el:
+                    logging.error(f"Login inputs not found - Username: {username_el is not None}, Password: {password_el is not None}")
                     raise Exception("Login inputs not found")
                 
                 # Clear and enter credentials with verification
@@ -376,23 +374,54 @@ def login_to_propstream(page: WebPage, email: str, password: str) -> None:
                 # Wait a moment before clicking login
                 time.sleep(random.uniform(2.0, 4.0))  # Human-like delay
                 
-                login_button = page.ele('xpath://*[@id="form-content"]//button | //button[contains(text(), "Log")] | //button[contains(@class, "login") or contains(., "Sign In")]', timeout=10)
+                # Try multiple login button selectors
+                login_button = None
+                login_selectors = [
+                    'xpath://*[@id="form-content"]//button',
+                    'xpath://button[contains(text(), "Log")]',
+                    'xpath://button[contains(@class, "login") or contains(., "Sign In")]',
+                    'xpath://button[@type="submit"]',
+                    'xpath://input[@type="submit"]',
+                    'xpath://button[contains(text(), "Login") or contains(text(), "Sign In")]',
+                    'xpath://*[contains(@class, "submit")]',
+                    'xpath://button[contains(@class, "btn")]',
+                    'xpath://button[contains(@class, "gradient-btn")]',
+                    'xpath://button'
+                ]
+                
+                for i, selector in enumerate(login_selectors):
+                    try:
+                        login_button = page.ele(selector, timeout=5)
+                        if login_button:
+                            logging.info(f"✅ Found login button with selector {i+1}: {selector}")
+                            break
+                    except Exception as e:
+                        logging.info(f"❌ Login button selector {i+1} failed: {e}")
+                        continue
+                
                 if login_button:
+                    # Scroll to button to ensure it's visible
+                    try:
+                        login_button.scroll.to_see()
+                        time.sleep(1)
+                    except Exception:
+                        pass
+                    
                     login_button.click()
                     logging.info("Login button clicked")
                 else:
                     raise Exception("Login button not found")
                 
-                # Wait for navigation
-                page.wait.doc_loaded(timeout=10)
-                time.sleep(random.uniform(2.0, 4.0))  # Reduced from 5-8 to 2-4 seconds
+                # Wait for navigation with longer timeout for login
+                page.wait.doc_loaded(timeout=15)
+                time.sleep(random.uniform(3.0, 5.0))  # Longer wait for login to complete
                 
                 # Handle any browser dialogs/alerts that might be blocking
                 logging.info("=== HANDLING BROWSER DIALOGS ===")
                 dialog_handled = False
                 
-                # Add minimal delay to prevent rate limiting
-                time.sleep(2)  # Reduced from 5 to 2 seconds
+                # Minimal delay to prevent rate limiting
+                time.sleep(0.5)  # Minimal wait for maximum speed
                 
                 # Handle session conflict popups specifically
                 try:
@@ -538,8 +567,24 @@ def login_to_propstream(page: WebPage, email: str, password: str) -> None:
                 logging.info(f"Final URL after login process: {final_url}")
                 
                 if "login.propstream.com" in final_url:
-                    logging.error("🚨 LOGIN FAILED - Still on login page after login process")
-                    take_screenshot(page, f"03b_still_on_login_attempt_{attempt}.png", f"Still on login page (attempt {attempt})")
+                    # Try to navigate to the main app to see if we're actually logged in
+                    try:
+                        logging.info("🔍 Attempting to navigate to main app to verify login...")
+                        page.get("https://app.propstream.com/")
+                        page.wait.doc_loaded(timeout=10)
+                        time.sleep(3)
+                        app_url = page.url
+                        logging.info(f"URL after navigating to app: {app_url}")
+                        
+                        if "login" in app_url.lower():
+                            logging.error("🚨 LOGIN FAILED - Still on login page after navigation")
+                            take_screenshot(page, f"03b_still_on_login_attempt_{attempt}.png", f"Still on login page (attempt {attempt})")
+                        else:
+                            logging.info("✅ Successfully logged in - able to access app")
+                            break  # Exit the retry loop since login was successful
+                    except Exception as nav_e:
+                        logging.error(f"🚨 LOGIN FAILED - Could not navigate to app: {nav_e}")
+                        take_screenshot(page, f"03b_still_on_login_attempt_{attempt}.png", f"Still on login page (attempt {attempt})")
                     
                     # Check for error messages on the login page
                     error_messages = page.eles('xpath://*[contains(@class, "error") or contains(@class, "alert") or contains(text(), "Invalid") or contains(text(), "incorrect")]')
@@ -596,8 +641,8 @@ def login_to_propstream(page: WebPage, email: str, password: str) -> None:
                     # Take screenshot of successful login destination
                     # take_screenshot(page, f"03c_successful_login_attempt_{attempt}.png", f"Successful login destination (attempt {attempt})")
                     
-                    # Add minimal delay after successful login
-                    delay = random.uniform(3.0, 6.0)  # Reduced from 10-20 to 3-6 seconds
+                    # Minimal delay after successful login
+                    delay = random.uniform(1.0, 2.0)  # Minimal wait for maximum speed
                     logging.info(f"⏱️  Adding {delay:.1f}s delay after successful login")
                     time.sleep(delay)
                     
@@ -709,8 +754,8 @@ def search_property(page: WebPage, address_format: str, apn: str, county: str, s
 
     address = address_format.format(apn, county, state_abbr)
     
-    max_retries = 2  # Reduced from 3 to 2
-    retry_delay = 3  # Reduced from 7 to 3 seconds
+    max_retries = 1  # Single attempt for maximum speed
+    retry_delay = 2  # Minimal retry delay
     
     for attempt in range(max_retries):
         try:
@@ -722,8 +767,8 @@ def search_property(page: WebPage, address_format: str, apn: str, county: str, s
             logging.info("Navigated to search page")
             
             # Wait for document and dynamic content to load
-            page.wait.doc_loaded(timeout=10)
-            time.sleep(2)  # Reduced from 5 to 2 seconds
+            page.wait.doc_loaded(timeout=5)
+            time.sleep(0.5)  # Minimal wait for speed
             
             # Check if we got redirected back to login immediately
             current_url_before_search = page.url
@@ -756,8 +801,8 @@ def search_property(page: WebPage, address_format: str, apn: str, county: str, s
             else:
                 logging.warning("⚠️ Page still loading after 60 seconds")
 
-            # Additional wait for JavaScript to initialize
-            time.sleep(3)  # Reduced from 10 to 3 seconds
+            # Minimal wait for JavaScript to initialize
+            time.sleep(1)  # Minimal wait for maximum speed
 
             # Check if page is still loading
             if page.title == "Loading...":
@@ -790,8 +835,8 @@ def search_property(page: WebPage, address_format: str, apn: str, county: str, s
             search_input.input(address)
             logging.info("Address entered in search")
             
-            # Wait for dropdown suggestions to appear
-            time.sleep(1)  # Reduced from 3 to 1 second
+            # Minimal wait for dropdown suggestions
+            time.sleep(0.5)  # Minimal wait for maximum speed
             
             # Look for dropdown suggestion that matches our APN
             logging.info("🔍 Looking for dropdown suggestion...")
@@ -849,7 +894,7 @@ def search_property(page: WebPage, address_format: str, apn: str, county: str, s
                         search_button.click()
                         logging.info("🎯 Search button clicked!")
                         search_button_clicked = True
-                        time.sleep(1)  # Reduced from 3 to 1 second
+                        time.sleep(0.5)  # Minimal wait for maximum speed
                         break
                 except Exception as e:
                     logging.info(f"❌ Search button selector {i+1} failed: {e}")
@@ -859,12 +904,12 @@ def search_property(page: WebPage, address_format: str, apn: str, county: str, s
                 logging.info("No explicit Search button found - relying on dropdown selection or Enter key")
             
             # Wait for search results to load and the page to update with results
-            page.wait.doc_loaded(timeout=10)
-            time.sleep(2)  # Reduced from 5 to 2 seconds
+            page.wait.doc_loaded(timeout=5)
+            time.sleep(1)  # Minimal wait for maximum speed
             
             # Wait for the search page to be updated with search results
             logging.info("=== WAITING FOR SEARCH PAGE TO UPDATE WITH RESULTS ===")
-            max_wait_attempts = 8  # Reduced from 15 to 8 attempts
+            max_wait_attempts = 5  # Reduced to 5 attempts for maximum speed
             search_results_loaded = False
             
             for wait_attempt in range(max_wait_attempts):
@@ -909,14 +954,14 @@ def search_property(page: WebPage, address_format: str, apn: str, county: str, s
                     logging.info("✅ Search results have been loaded on the page!")
                     break
                 
-                logging.info(f"Page not yet updated with results, waiting 2 more seconds...")
-                time.sleep(2)  # Reduced from 3 to 2 seconds
+                logging.info(f"Page not yet updated with results, waiting 1 more second...")
+                time.sleep(1)  # Minimal wait for maximum speed
             
             if not search_results_loaded:
                 logging.warning("⚠️ Search results may not have loaded properly after maximum wait time")
             
-            # Wait a bit more to ensure all dynamic content is loaded
-            time.sleep(2)  # Reduced from 5 to 2 seconds
+            # Minimal wait for dynamic content
+            time.sleep(0.5)  # Minimal wait for maximum speed
             
             # Take screenshot after search to see the results
             logging.info(f"URL after search: {page.url}")
@@ -1077,12 +1122,12 @@ def search_property(page: WebPage, address_format: str, apn: str, county: str, s
             
             # Retry loop to wait for Details buttons to appear
             details_found = False
-            max_details_wait = 6  # Reduced from 12 to 6 attempts (30 seconds max)
+            max_details_wait = 3  # Reduced to 3 attempts (15 seconds max) for maximum speed
             for details_wait in range(max_details_wait):
                 # Take screenshot during loading/waiting phase
                 if details_wait == 0:  # First attempt
                     take_screenshot(page, "02_loading_waiting.png", "Loading/waiting for Details buttons", property_info)
-                time.sleep(3)  # Reduced from 5 to 3 seconds each iteration
+                time.sleep(2)  # Minimal wait for maximum speed
                 
                 # Scroll to ensure all elements are visible
                 try:
@@ -1247,8 +1292,8 @@ def search_property(page: WebPage, address_format: str, apn: str, county: str, s
                     details_anchor.click()
                     
                     # Wait for the details page to load
-                    page.wait.doc_loaded(timeout=10)
-                    time.sleep(2)  # Reduced from 5 to 2 seconds
+                    page.wait.doc_loaded(timeout=5)
+                    time.sleep(1)  # Minimal wait for maximum speed
                     
                     # Take screenshot of details page
                     logging.info(f"✅ Successfully navigated to details page. URL: {page.url}")
@@ -1670,7 +1715,7 @@ def fetch_zillow_data(page: WebPage, north: float, south: float, east: float, we
     potential_homes = []
     current_page = 1
     total_pages = None
-    max_pages = 1  # Reduced from 2 to 1 page for faster processing
+    max_pages = 2  # Optimized to 2 pages for speed while maintaining good results
     
     base_search_url = get_url_for_page()
     
@@ -1730,7 +1775,7 @@ def fetch_zillow_data(page: WebPage, north: float, south: float, east: float, we
 
             current_page += 1
             if current_page <= total_pages and current_page <= max_pages:
-                time.sleep(1)  # Reduced from 3 to 1 second
+                time.sleep(0.5)  # Minimal wait for maximum speed
 
         except Exception as e:
             logging.error(f"Error fetching data from Zillow API on page {current_page}: {e}")
@@ -1745,7 +1790,7 @@ API_KEYS = [
 def get_api_key():
     return random.choice(API_KEYS)
 
-def fetch_price_history(zpid: str, max_retries: int = 3) -> Optional[float]:
+def fetch_price_history(zpid: str, max_retries: int = 1) -> Optional[float]:  # Reduced retries for speed
     url = "https://zillow-com1.p.rapidapi.com/property"
     params = {"zpid": zpid}
     
@@ -1756,12 +1801,11 @@ def fetch_price_history(zpid: str, max_retries: int = 3) -> Optional[float]:
         }
         
         try:
-            response = requests.get(url, headers=headers, params=params)
+            response = requests.get(url, headers=headers, params=params, timeout=8)  # Optimized timeout
             if response.status_code == 429:
-                wait_time = (2 ** retry) + random.uniform(0, 1)
-                logging.info(f"Rate limit hit for ZPID {zpid}. Retrying in {wait_time:.2f} seconds...")
-                time.sleep(wait_time)
-                continue
+                # Skip retry for rate limit - return None immediately for speed
+                logging.info(f"Rate limit hit for ZPID {zpid}. Skipping for speed...")
+                return None
                 
             response.raise_for_status()
             data = response.json()
@@ -1774,13 +1818,29 @@ def fetch_price_history(zpid: str, max_retries: int = 3) -> Optional[float]:
             logging.info(f"No valid price found in history for ZPID {zpid}")
             return None
         except Exception as e:
-            if retry < max_retries - 1:
-                wait_time = (2 ** retry) + random.uniform(0, 1)
-                logging.warning(f"Error fetching price history for ZPID {zpid}: {e}. Retrying in {wait_time:.2f} seconds...")
-                time.sleep(wait_time)
-            else:
-                logging.error(f"Error fetching price history for ZPID {zpid}: {e}")
-                return None
+            # Skip retries for speed - return None immediately
+            logging.warning(f"Error fetching price history for ZPID {zpid}: {e}. Skipping for speed...")
+            return None
+
+def fetch_price_history_parallel(zpids: List[str], max_workers: int = 10) -> Dict[str, Optional[float]]:
+    """Fetch price history for multiple ZPIDs in parallel"""
+    results = {}
+    
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        # Submit all tasks
+        future_to_zpid = {executor.submit(fetch_price_history, zpid): zpid for zpid in zpids}
+        
+        # Collect results as they complete
+        for future in as_completed(future_to_zpid):
+            zpid = future_to_zpid[future]
+            try:
+                result = future.result(timeout=12)  # 12 second timeout per request for reliability
+                results[zpid] = result
+            except Exception as e:
+                logging.warning(f"Error in parallel fetch for ZPID {zpid}: {e}")
+                results[zpid] = None
+    
+    return results
 
 def filter_properties_by_acreage(properties: List[Dict], target_acreage: float) -> List[Dict]:
     min_acreage = target_acreage * MIN_ACREAGE_RATIO
@@ -1911,18 +1971,29 @@ def find_comparable_properties(
     total_comparables_found = len(filtered_homes) + len(potential_filtered)
 
     if len(filtered_homes) < MIN_COMPARABLE_PROPERTIES:
-        for prop in potential_filtered:
-            if len(filtered_homes) >= MIN_COMPARABLE_PROPERTIES:
-                break
-            price = fetch_price_history(prop['zpid'])
-            if price:
-                prop['price'] = price
-                prop['price_text'] = f"${price:,.2f}"
-                prop['price_per_acre'] = price / prop['acreage'] if prop['acreage'] > 0 else None
-                filtered_homes.append(prop)
-                logging.info(f"Added property with price from history: {prop['address']}")
+        # Collect ZPIDs for parallel processing
+        zpids_to_fetch = [prop['zpid'] for prop in potential_filtered if prop.get('zpid')]
+        
+        if zpids_to_fetch:
+            logging.info(f"🚀 Fetching price history for {len(zpids_to_fetch)} properties in parallel...")
             
-            time.sleep(random.uniform(1, 2))  # Reduced from 3-5 to 1-2 seconds
+            # Fetch all price histories in parallel with more workers
+            price_results = fetch_price_history_parallel(zpids_to_fetch, max_workers=15)  # 15 parallel workers for speed
+            
+            # Apply results to properties
+            for prop in potential_filtered:
+                if len(filtered_homes) >= MIN_COMPARABLE_PROPERTIES:
+                    break
+                if prop.get('zpid') and prop['zpid'] in price_results:
+                    price = price_results[prop['zpid']]
+                    if price:
+                        prop['price'] = price
+                        prop['price_text'] = f"${price:,.2f}"
+                        prop['price_per_acre'] = price / prop['acreage'] if prop['acreage'] > 0 else None
+                        filtered_homes.append(prop)
+                        logging.info(f"Added property with price from history: {prop['address']}")
+        else:
+            logging.warning("No ZPIDs found for price history fetching")
 
     valid_properties, outlier_properties = detect_outliers_iqr(filtered_homes)
 
@@ -1970,8 +2041,8 @@ async def _process_valuation(property_request: PropertyRequest):
     time_since_last_request = current_time - last_request_time
     if time_since_last_request < MIN_REQUEST_INTERVAL:
         wait_time = MIN_REQUEST_INTERVAL - time_since_last_request
-        # Add minimal random variation for faster processing
-        random_delay = random.uniform(1, 3)  # Reduced from 5-15 to 1-3 seconds
+        # Minimal random variation for maximum speed
+        random_delay = random.uniform(0.3, 0.6)  # Optimized delay for speed and reliability
         total_wait = wait_time + random_delay
         logging.info(f"⏱️  Rate limiting: waiting {total_wait:.1f} seconds before next request")
         await asyncio.sleep(total_wait)

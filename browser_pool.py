@@ -11,7 +11,7 @@ class BrowserPool:
         self.persistent_browser: Optional[WebPage] = None
         self.session_valid = False
         self.session_created_at = None
-        self.max_session_age = 300  # 5 minutes max session age for ultra-fast performance
+        self.max_session_age = 300  # 5 minutes max session age for optimal performance
         self.lock = asyncio.Lock()
         
     async def initialize(self):
@@ -76,12 +76,12 @@ class BrowserPool:
         # Additional randomization
         co.set_argument(f'--window-size={random.randint(1200, 1920)},{random.randint(800, 1080)}')
         
-        # Create browser with ultra-fast timeout handling
+        # Create browser with maximum speed timeout handling
         try:
-            browser = WebPage(chromium_options=co, timeout=8)  # Ultra-fast: 8s timeout
+            browser = WebPage(chromium_options=co, timeout=6)  # Optimized: 6s timeout for reliability
             
-            # Set ultra-fast timeouts
-            browser.set.timeouts(base=5, page_load=8, script=5)
+            # Set optimized timeouts for speed and reliability
+            browser.set.timeouts(base=4, page_load=6, script=4)
             
             # Apply stealth measures
             try:
