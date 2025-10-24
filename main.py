@@ -2219,7 +2219,7 @@ async def _process_valuation(property_request: PropertyRequest):
             logging.info("🔍 Finding comparable properties using Zillow API...")
             # For Regrid flow, we don't need the page parameter, so we'll use a dummy page
             # The function will use Zillow API directly
-            comparable_properties, _, final_radius, total_comparables_found, _ = await asyncio.get_event_loop().run_in_executor(
+            comparable_properties, _, final_radius, total_comparables_found, search_url = await asyncio.get_event_loop().run_in_executor(
                 None, find_comparable_properties, None, latitude, longitude, target_acreage
             )
             
@@ -2248,7 +2248,7 @@ async def _process_valuation(property_request: PropertyRequest):
                 price_per_acre_stats=ValuationStats(**valuation_results['price_per_acre_stats']) if valuation_results['price_per_acre_stats'] else None,
                 comparable_properties=[ComparableProperty(**prop) for prop in comparable_properties],
                 outlier_properties=[],  # No outliers in Regrid flow
-                search_url=None,
+                search_url=search_url,
                 data_source="Regrid API + Zillow API",
                 processing_time_seconds=0.0  # Will be calculated by the endpoint
             )
