@@ -27,7 +27,6 @@ from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 from DrissionPage.errors import BrowserConnectError, AlertExistsError
 from functools import lru_cache
-from typing import Optional
 from pydantic_settings import BaseSettings
 from pydantic import Field
 
@@ -91,13 +90,15 @@ class ValuationResponse(BaseModel):
     comparable_properties: List[ComparableProperty]
     outlier_properties: List[ComparableProperty]
     search_url: Optional[str] = None
+    data_source: Optional[str] = None
+    processing_time_seconds: Optional[float] = None
 
 class Settings(BaseSettings):
     CACHE_EXPIRATION: int = 24 * 60 * 60  # 24 hours
     MAX_CACHE_SIZE: int = 1000
     API_RETRY_ATTEMPTS: int = 3
     
-    regrid_api_token: str = Field(default="")
+    regrid_api_token: str = Field(default="eyJhbGciOiJIUzI1NiJ9.eyJpc3MiOiJyZWdyaWQuY29tIiwiaWF0IjoxNzYxMjMxMDg0LCJleHAiOjE3NjM4MjMwODQsInUiOjYwNjYzMSwiZyI6MjMxNTMsImNhcCI6InBhOnRzOnBzOmJmOm1hOnR5OmVvOnpvOnNiIn0.uQc5QFl65SySF0tOHqtSRV-5FLQtxQGHMYpLK6KK75U")
     zillow_rapid_api_key: str = Field(default="")
     
     model_config = {
@@ -108,7 +109,6 @@ class Settings(BaseSettings):
 settings = Settings()
 
 # Import browser pool
-import asyncio
 from browser_pool import browser_pool
 
 # Add semaphore to limit concurrent requests
@@ -1168,7 +1168,7 @@ def search_property(page: WebPage, address_format: str, apn: str, county: str, s
                 search_input = page.ele('xpath://input[@placeholder="Enter County, City, Zip Code(s) or APN #"]', timeout=10)
                 if search_input:
                     search_input.clear()
-                    logging.info(" Page refreshed and search input cleared - retrying search")
+                    logging.info("🔄 Page refreshed and search input cleared - retrying search")
                 else:
                     logging.warning("⚠️ Could not find search input after refresh")
                 raise Exception(f"Details buttons did not appear after extended wait on attempt {attempt + 1} - page refreshed")
@@ -1331,7 +1331,7 @@ def search_property(page: WebPage, address_format: str, apn: str, county: str, s
                 time.sleep(retry_delay)
                 # Don't force fresh browser for page refresh issues - just retry with same session
                 if "page refreshed" in str(e):
-                    logging.info(" Retrying with same session after page refresh")
+                    logging.info("🔄 Retrying with same session after page refresh")
                 elif "No Details buttons found" in str(e) or "Details anchor not found" in str(e):
                     logging.info("🔄 Forcing fresh browser due to Details button issues")
                     browser_pool.invalidate_session()
@@ -1414,6 +1414,130 @@ def geocode_location(query: str, timeout: int = 15) -> Optional[Tuple[float, flo
     except Exception as e:
         logging.warning(f"Geocoding error for '{query}': {e}")
     return None
+
+def fetch_property_from_regrid(apn: str, county: str, state: str) -> Optional[Dict]:
+    """
+    Fetch property data from Regrid API using APN, county, and state.
+    Returns property data in the same format as PropStream scraping.
+    """
+    try:
+        settings = Settings()
+        if not settings.regrid_api_token:
+            logging.warning("Regrid API token not configured")
+            return None
+            
+        # Build the path parameter for Regrid API
+        state_lower = state.lower()
+        county_lower = county.lower().replace(" ", "-")
+        path = f"/us/{state_lower}/{county_lower}"
+        
+        url = "https://app.regrid.com/api/v2/parcels/apn"
+        headers = {
+            "Authorization": f"Bearer {settings.regrid_api_token}",
+            "Content-Type": "application/json"
+        }
+        params = {
+            "parcelnumb": apn,
+            "path": path
+        }
+        
+        logging.info(f"🔍 Fetching property data from Regrid API for APN: {apn}, Path: {path}")
+        
+        response = requests.get(url, headers=headers, params=params, timeout=10)
+        
+        if response.status_code == 200:
+            data = response.json()
+            
+            if data.get("parcels") and data["parcels"].get("features"):
+                feature = data["parcels"]["features"][0]  
+                properties = feature.get("properties", {})
+                fields = properties.get("fields", {})
+                
+                logging.info(f"✅ Successfully fetched property data from Regrid for APN: {apn}")
+                
+                # Extract and map data to match PropStream format
+                property_data = {
+                    "address": fields.get("address", ""),
+                    "lot_size_acres": None,
+                    "lot_size_sqft": fields.get("ll_gissqft", 0),
+                    "latitude": float(fields.get("lat", 0)) if fields.get("lat") else None,
+                    "longitude": float(fields.get("lon", 0)) if fields.get("lon") else None,
+                    "land_value": fields.get("landval", 0),
+                    "improvement_value": fields.get("improvval", 0),
+                    "total_assessed_value": fields.get("parval", 0),
+                    "owner": fields.get("owner", ""),
+                    "zoning": fields.get("zoning", ""),
+                    "zoning_description": fields.get("zoning_description", ""),
+                    "use_description": fields.get("usedesc", ""),
+                    "county": fields.get("county", county),
+                    "state": fields.get("state2", state),
+                    "zip_code": fields.get("szip5", ""),
+                    "data_source": "regrid"
+                }
+                
+                # Convert square feet to acres if we have lot size
+                if property_data["lot_size_sqft"]:
+                    property_data["lot_size_acres"] = property_data["lot_size_sqft"] / 43560
+                
+                logging.info(f"📊 Regrid data extracted - Address: {property_data['address']}, "
+                           f"Lot Size: {property_data['lot_size_acres']:.2f} acres, "
+                           f"Coordinates: ({property_data['latitude']}, {property_data['longitude']})")
+                
+                return property_data
+            else:
+                logging.warning(f"⚠️ No property found in Regrid for APN: {apn}")
+                return None
+        else:
+            logging.warning(f"⚠️ Regrid API request failed with status {response.status_code}: {response.text}")
+            return None
+            
+    except Exception as e:
+        logging.error(f"❌ Error fetching from Regrid API: {e}")
+        return None
+
+def extract_property_from_sidebar_regrid(property_data: Dict) -> Optional[Dict]:
+    """
+    Extract property information from Regrid data (similar to sidebar extraction from PropStream).
+    This replaces the PropStream sidebar extraction with Regrid data.
+    """
+    try:
+        if not property_data or property_data.get("data_source") != "regrid":
+            return None
+            
+        logging.info("📋 Extracting property data from Regrid response...")
+        
+        # Extract lot size from Regrid data
+        lot_size_acres = property_data.get("lot_size_acres")
+        lot_size_sqft = property_data.get("lot_size_sqft")
+        
+        if lot_size_acres and lot_size_acres > 0:
+            logging.info(f"✅ Found lot size from Regrid: {lot_size_acres:.2f} acres ({lot_size_sqft} sqft)")
+            
+            return {
+                "lot_size_acres": lot_size_acres,
+                "lot_size_sqft": lot_size_sqft,
+                "address": property_data.get("address", ""),
+                "latitude": property_data.get("latitude"),
+                "longitude": property_data.get("longitude"),
+                "land_value": property_data.get("land_value", 0),
+                "improvement_value": property_data.get("improvement_value", 0),
+                "total_assessed_value": property_data.get("total_assessed_value", 0),
+                "owner": property_data.get("owner", ""),
+                "zoning": property_data.get("zoning", ""),
+                "zoning_description": property_data.get("zoning_description", ""),
+                "use_description": property_data.get("use_description", ""),
+                "county": property_data.get("county", ""),
+                "state": property_data.get("state", ""),
+                "zip_code": property_data.get("zip_code", ""),
+                "data_source": "regrid"
+            }
+        else:
+            logging.warning("⚠️ No valid lot size found in Regrid data")
+            return None
+            
+    except Exception as e:
+        logging.error(f"❌ Error extracting property from Regrid data: {e}")
+        return None
 
 def extract_property_info(page: WebPage) -> Optional[Dict]:
     try:
@@ -1666,7 +1790,7 @@ def calculate_bounding_box(latitude: float, longitude: float, miles: float) -> T
     west = longitude - lng_offset
     return north, south, east, west
 
-def fetch_zillow_data(page: WebPage, north: float, south: float, east: float, west: float) -> Tuple[List[Dict], List[Dict], str]:
+def fetch_zillow_data(page: Optional[WebPage], north: float, south: float, east: float, west: float) -> Tuple[List[Dict], List[Dict], str]:
     def get_url_for_page(page_num: Optional[int] = None) -> str:
         search_query_state = {
             "isMapVisible": True,
@@ -1933,7 +2057,7 @@ def calculate_property_value(target_acreage: float, comparable_properties: List[
     }
 
 def find_comparable_properties(
-    page: WebPage, 
+    page: Optional[WebPage], 
     latitude: float, 
     longitude: float, 
     target_acreage: float
@@ -2070,12 +2194,92 @@ async def _process_valuation(property_request: PropertyRequest):
         logging.warning(f"Rate limit exceeded for {rate_limit_key}")
         raise HTTPException(status_code=429, detail="Rate limit exceeded, please try again later")
 
+    # STEP 1: Try to get property data from Regrid API first (much faster)
+    logging.info("🚀 Attempting to fetch property data from Regrid API...")
+    regrid_property_data = await asyncio.get_event_loop().run_in_executor(
+        None, fetch_property_from_regrid, cleaned_apn, 
+        property_request.county, property_request.state
+    )
+    
+    if regrid_property_data:
+        # Successfully got data from Regrid - extract property info
+        logging.info("✅ Successfully fetched property data from Regrid API")
+        target_property_info = await asyncio.get_event_loop().run_in_executor(
+            None, extract_property_from_sidebar_regrid, regrid_property_data
+        )
+        
+        if target_property_info:
+            # We have all the data we need from Regrid - skip PropStream entirely
+            logging.info("🎯 Using Regrid data - skipping PropStream scraping")
+            target_acreage = target_property_info.get("lot_size_acres", 1.0)
+            latitude = target_property_info.get("latitude", 0.0)
+            longitude = target_property_info.get("longitude", 0.0)
+            
+            # Continue with Zillow API calls and calculations
+            logging.info("🔍 Finding comparable properties using Zillow API...")
+            # For Regrid flow, we don't need the page parameter, so we'll use a dummy page
+            # The function will use Zillow API directly
+            comparable_properties, _, final_radius, total_comparables_found, _ = await asyncio.get_event_loop().run_in_executor(
+                None, find_comparable_properties, None, latitude, longitude, target_acreage
+            )
+            
+            if not comparable_properties:
+                logging.warning("No comparable properties found")
+                raise HTTPException(
+                    status_code=404, 
+                    detail="No comparable properties found for valuation"
+                )
+            
+            # Calculate valuation
+            logging.info("📊 Calculating property valuation...")
+            valuation_results = calculate_property_value(target_acreage, comparable_properties)
+            
+            # Prepare response
+            valuation_response = ValuationResponse(
+                target_property=f"APN# {cleaned_apn}, {property_request.county}, {property_request.state}",
+                target_acreage=target_acreage,
+                target_latitude=latitude,
+                target_longitude=longitude,
+                search_radius_miles=final_radius,
+                total_comparables_found=total_comparables_found,
+                comparable_count=valuation_results['comparable_count'],
+                estimated_value_avg=valuation_results['estimated_value_avg'],
+                estimated_value_median=valuation_results['estimated_value_median'],
+                price_per_acre_stats=ValuationStats(**valuation_results['price_per_acre_stats']) if valuation_results['price_per_acre_stats'] else None,
+                comparable_properties=[ComparableProperty(**prop) for prop in comparable_properties],
+                outlier_properties=[],  # No outliers in Regrid flow
+                search_url=None,
+                data_source="Regrid API + Zillow API",
+                processing_time_seconds=0.0  # Will be calculated by the endpoint
+            )
+            
+            # Cache the response in Redis
+            cache_key = hashlib.md5(f"{cleaned_apn}_{property_request.county}_{property_request.state}".encode()).hexdigest()
+            try:
+                redis_client.setex(
+                    cache_key,
+                    settings.CACHE_EXPIRATION,
+                    json.dumps(valuation_response.model_dump())
+                )
+                logging.info(f"Cached valuation response for {cache_key}")
+            except Exception as e:
+                logging.warning(f"Failed to cache valuation response: {str(e)}")
+            
+            return valuation_response
+        else:
+            logging.warning("⚠️ Failed to extract property info from Regrid data - falling back to PropStream")
+    else:
+        logging.warning("⚠️ Regrid API failed - falling back to PropStream scraping")
+
+    # STEP 2: Fallback to PropStream scraping if Regrid failed
+    logging.info("🔄 Falling back to PropStream scraping...")
     async with browser_pool.get_browser() as page:
         try:
             # Ensure logged in for this browser instance (once)
             await ensure_logged_in(page)
             logging.info("Login successful")
-
+            
+            # STEP 2: PropStream scraping (fallback)
             # Search for the target property
             await asyncio.get_event_loop().run_in_executor(
                 None,
@@ -2097,17 +2301,18 @@ async def _process_valuation(property_request: PropertyRequest):
                 target_property_info = await asyncio.get_event_loop().run_in_executor(
                     None, extract_property_info, page
                 )
-            
-            if not target_property_info:
-                logging.error("Failed to extract target property info from both sidebar and details page")
-                raise HTTPException(status_code=500, detail="Failed to extract target property information")
-            
-            # Browser cleanup will be handled by the browser pool automatically
-            logging.info("✅ Property extraction completed - browser will be cleaned up automatically")
+                
+                if not target_property_info:
+                    logging.error("Failed to extract target property info from both sidebar and details page")
+                    raise HTTPException(status_code=500, detail="Failed to extract target property information")
+                
+                # Browser cleanup will be handled by the browser pool automatically
+                logging.info("✅ Property extraction completed - browser will be cleaned up automatically")
 
+            # Extract target acreage from property info
             target_acreage = target_property_info.get("acreage", 1.0)
 
-            # Extract coordinates
+            # Extract coordinates (try from page first, then geocoding fallback)
             coordinates = await asyncio.get_event_loop().run_in_executor(
                 None, extract_coordinates, page.html
             )
@@ -2132,6 +2337,10 @@ async def _process_valuation(property_request: PropertyRequest):
             # Calculate valuation based on comparable properties
             valuation_results = calculate_property_value(target_acreage, valid_properties)
             
+            # Determine data source for logging
+            data_source = "Regrid API" if target_property_info and target_property_info.get("data_source") == "regrid" else "PropStream"
+            logging.info(f"📊 Valuation completed using {data_source} for property data")
+            
             # Prepare response
             valuation_response = ValuationResponse(
                 target_property=f"APN# {cleaned_apn}, {property_request.county}, {property_request.state}",
@@ -2146,7 +2355,9 @@ async def _process_valuation(property_request: PropertyRequest):
                 price_per_acre_stats=ValuationStats(**valuation_results['price_per_acre_stats']) if valuation_results['price_per_acre_stats'] else None,
                 comparable_properties=[ComparableProperty(**prop) for prop in valid_properties],
                 outlier_properties=[ComparableProperty(**prop) for prop in outlier_properties],
-                search_url=search_url
+                search_url=search_url,
+                data_source=data_source,
+                processing_time_seconds=0.0  # Will be calculated by the endpoint
             )
 
             # Cache the response in Redis
