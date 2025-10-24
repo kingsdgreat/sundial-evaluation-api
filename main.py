@@ -98,7 +98,7 @@ class Settings(BaseSettings):
     MAX_CACHE_SIZE: int = 1000
     API_RETRY_ATTEMPTS: int = 3
     
-    regrid_api_token: str = Field(default="eyJhbGciOiJIUzI1NiJ9.eyJpc3MiOiJyZWdyaWQuY29tIiwiaWF0IjoxNzYxMjMxMDg0LCJleHAiOjE3NjM4MjMwODQsInUiOjYwNjYzMSwiZyI6MjMxNTMsImNhcCI6InBhOnRzOnBzOmJmOm1hOnR5OmVvOnpvOnNiIn0.uQc5QFl65SySF0tOHqtSRV-5FLQtxQGHMYpLK6KK75U")
+    regrid_api_token: str = Field(default="")
     zillow_rapid_api_key: str = Field(default="")
     
     model_config = {
@@ -1427,9 +1427,9 @@ def fetch_property_from_regrid(apn: str, county: str, state: str) -> Optional[Di
             return None
             
         # Build the path parameter for Regrid API
-        state_lower = state.lower()
-        county_lower = county.lower().replace(" ", "-")
-        path = f"/us/{state_lower}/{county_lower}"
+        state_abbr = get_cached_state_abbreviation(state).lower()
+        county_clean = county.lower().replace(" county", "").replace(" ", "-")
+        path = f"/us/{state_abbr}/{county_clean}"
         
         url = "https://app.regrid.com/api/v2/parcels/apn"
         headers = {
