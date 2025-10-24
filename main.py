@@ -2142,9 +2142,120 @@ async def health_check():
 
 @app.post("/valuate-property", response_model=ValuationResponse)
 async def valuate_property(property_request: PropertyRequest):
-    # Sequential processing - wait for turn
-    async with REQUEST_LOCK:
-        return await _process_valuation(property_request)
+    # Check if we can use Regrid API first (allows concurrent processing)
+    cleaned_apn = clean_apn(property_request.apn)
+    
+    # Try Regrid API first (fast, can be concurrent)
+    regrid_property_data = await asyncio.get_event_loop().run_in_executor(
+        None, fetch_property_from_regrid, cleaned_apn, 
+        property_request.county, property_request.state
+    )
+    
+    if regrid_property_data:
+        # Regrid found the property - process without lock (concurrent)
+        logging.info("✅ Regrid found property - processing concurrently")
+        return await _process_regrid_valuation(property_request, regrid_property_data)
+    else:
+        # Regrid failed - use PropStream with lock (sequential)
+        logging.info("⚠️ Regrid failed - using PropStream with sequential processing")
+        async with REQUEST_LOCK:
+            return await _process_valuation(property_request)
+
+
+async def _process_regrid_valuation(property_request: PropertyRequest, regrid_property_data: Dict):
+    """
+    Process a property valuation request using Regrid API data (concurrent processing)
+    """
+    global last_request_time
+    
+    # Validate property request before processing
+    if not validate_property_request(property_request):
+        raise HTTPException(
+            status_code=400, 
+            detail=f"Invalid property request format. Please check APN, county, and state format."
+        )
+    
+    cleaned_apn = clean_apn(property_request.apn)
+    cache_key = generate_cache_key(property_request)
+    
+    # Check Redis cache for existing valuation
+    cached_result = redis_client.get(cache_key)
+    if cached_result:
+        logging.info(f"Cache hit for {cache_key}")
+        try:
+            cached_data = json.loads(cached_result)
+            if 'search_url' not in cached_data:
+                cached_data['search_url'] = None
+            return ValuationResponse(**cached_data)
+        except Exception as e:
+            logging.warning(f"Error parsing cached data: {str(e)}. Proceeding with fresh valuation.")
+    
+    # Extract property info from Regrid data
+    logging.info("✅ Successfully fetched property data from Regrid API")
+    target_property_info = await asyncio.get_event_loop().run_in_executor(
+        None, extract_property_from_sidebar_regrid, regrid_property_data
+    )
+    
+    if target_property_info:
+        # We have all the data we need from Regrid - skip PropStream entirely
+        logging.info("🎯 Using Regrid data - processing concurrently")
+        target_acreage = target_property_info.get("lot_size_acres", 1.0)
+        latitude = target_property_info.get("latitude", 0.0)
+        longitude = target_property_info.get("longitude", 0.0)
+        
+        # Continue with Zillow API calls and calculations
+        logging.info("🔍 Finding comparable properties using Zillow API...")
+        comparable_properties, _, final_radius, total_comparables_found, search_url = await asyncio.get_event_loop().run_in_executor(
+            None, find_comparable_properties, None, latitude, longitude, target_acreage
+        )
+        
+        if not comparable_properties:
+            logging.warning("No comparable properties found")
+            raise HTTPException(
+                status_code=404, 
+                detail="No comparable properties found for valuation"
+            )
+        
+        # Calculate valuation
+        logging.info("📊 Calculating property valuation...")
+        valuation_results = calculate_property_value(target_acreage, comparable_properties)
+        
+        # Prepare response
+        valuation_response = ValuationResponse(
+            target_property=f"APN# {cleaned_apn}, {property_request.county}, {property_request.state}",
+            target_acreage=target_acreage,
+            target_latitude=latitude,
+            target_longitude=longitude,
+            search_radius_miles=final_radius,
+            total_comparables_found=total_comparables_found,
+            comparable_count=valuation_results['comparable_count'],
+            estimated_value_avg=valuation_results['estimated_value_avg'],
+            estimated_value_median=valuation_results['estimated_value_median'],
+            price_per_acre_stats=ValuationStats(**valuation_results['price_per_acre_stats']) if valuation_results['price_per_acre_stats'] else None,
+            comparable_properties=[ComparableProperty(**prop) for prop in comparable_properties],
+            outlier_properties=[],  # No outliers in Regrid flow
+            search_url=search_url,
+            data_source="Regrid API + Zillow API",
+            processing_time_seconds=0.0  # Will be calculated by the endpoint
+        )
+        
+        # Cache the response in Redis
+        try:
+            redis_client.setex(
+                cache_key,
+                settings.CACHE_EXPIRATION,
+                json.dumps(valuation_response.model_dump())
+            )
+            logging.info(f"Cached valuation response for {cache_key}")
+        except Exception as e:
+            logging.warning(f"Failed to cache valuation response: {str(e)}")
+        
+        return valuation_response
+    else:
+        logging.warning("⚠️ Failed to extract property info from Regrid data - falling back to PropStream")
+        # Fall back to PropStream processing
+        async with REQUEST_LOCK:
+            return await _process_valuation(property_request)
 
 
 async def _process_valuation(property_request: PropertyRequest):
@@ -2194,84 +2305,7 @@ async def _process_valuation(property_request: PropertyRequest):
         logging.warning(f"Rate limit exceeded for {rate_limit_key}")
         raise HTTPException(status_code=429, detail="Rate limit exceeded, please try again later")
 
-    # STEP 1: Try to get property data from Regrid API first (much faster)
-    logging.info("🚀 Attempting to fetch property data from Regrid API...")
-    regrid_property_data = await asyncio.get_event_loop().run_in_executor(
-        None, fetch_property_from_regrid, cleaned_apn, 
-        property_request.county, property_request.state
-    )
-    
-    if regrid_property_data:
-        # Successfully got data from Regrid - extract property info
-        logging.info("✅ Successfully fetched property data from Regrid API")
-        target_property_info = await asyncio.get_event_loop().run_in_executor(
-            None, extract_property_from_sidebar_regrid, regrid_property_data
-        )
-        
-        if target_property_info:
-            # We have all the data we need from Regrid - skip PropStream entirely
-            logging.info("🎯 Using Regrid data - skipping PropStream scraping")
-            target_acreage = target_property_info.get("lot_size_acres", 1.0)
-            latitude = target_property_info.get("latitude", 0.0)
-            longitude = target_property_info.get("longitude", 0.0)
-            
-            # Continue with Zillow API calls and calculations
-            logging.info("🔍 Finding comparable properties using Zillow API...")
-            # For Regrid flow, we don't need the page parameter, so we'll use a dummy page
-            # The function will use Zillow API directly
-            comparable_properties, _, final_radius, total_comparables_found, search_url = await asyncio.get_event_loop().run_in_executor(
-                None, find_comparable_properties, None, latitude, longitude, target_acreage
-            )
-            
-            if not comparable_properties:
-                logging.warning("No comparable properties found")
-                raise HTTPException(
-                    status_code=404, 
-                    detail="No comparable properties found for valuation"
-                )
-            
-            # Calculate valuation
-            logging.info("📊 Calculating property valuation...")
-            valuation_results = calculate_property_value(target_acreage, comparable_properties)
-            
-            # Prepare response
-            valuation_response = ValuationResponse(
-                target_property=f"APN# {cleaned_apn}, {property_request.county}, {property_request.state}",
-                target_acreage=target_acreage,
-                target_latitude=latitude,
-                target_longitude=longitude,
-                search_radius_miles=final_radius,
-                total_comparables_found=total_comparables_found,
-                comparable_count=valuation_results['comparable_count'],
-                estimated_value_avg=valuation_results['estimated_value_avg'],
-                estimated_value_median=valuation_results['estimated_value_median'],
-                price_per_acre_stats=ValuationStats(**valuation_results['price_per_acre_stats']) if valuation_results['price_per_acre_stats'] else None,
-                comparable_properties=[ComparableProperty(**prop) for prop in comparable_properties],
-                outlier_properties=[],  # No outliers in Regrid flow
-                search_url=search_url,
-                data_source="Regrid API + Zillow API",
-                processing_time_seconds=0.0  # Will be calculated by the endpoint
-            )
-            
-            # Cache the response in Redis
-            cache_key = hashlib.md5(f"{cleaned_apn}_{property_request.county}_{property_request.state}".encode()).hexdigest()
-            try:
-                redis_client.setex(
-                    cache_key,
-                    settings.CACHE_EXPIRATION,
-                    json.dumps(valuation_response.model_dump())
-                )
-                logging.info(f"Cached valuation response for {cache_key}")
-            except Exception as e:
-                logging.warning(f"Failed to cache valuation response: {str(e)}")
-            
-            return valuation_response
-        else:
-            logging.warning("⚠️ Failed to extract property info from Regrid data - falling back to PropStream")
-    else:
-        logging.warning("⚠️ Regrid API failed - falling back to PropStream scraping")
-
-    # STEP 2: Fallback to PropStream scraping if Regrid failed
+    # PropStream scraping (sequential processing only)
     logging.info("🔄 Falling back to PropStream scraping...")
     async with browser_pool.get_browser() as page:
         try:
